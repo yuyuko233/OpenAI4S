@@ -9,7 +9,10 @@ self-test, enforces the boundary when available, and otherwise continues with a
 high-visibility **degraded** status. Use `enforce` to fail closed before a worker
 starts, or `off` for an explicit trusted-host opt-out. Unsupported/degraded is
 not equivalent to sandboxed; keep the default loopback bind even when the
-self-test passes.
+self-test passes. Team-mode local Cells are stricter: their session read policy
+is an authorization boundary, so `auto` may not degrade, `off` is refused, and
+a missing backend or incomplete/failed self-test prevents the Cell from
+starting.
 
 The sandbox makes the host filesystem read-only to a worker except for the
 session workspace and its private temporary directory. Raw worker network is
@@ -19,6 +22,27 @@ services remain available through audited Host RPC. This boundary covers
 Python/R kernels and their subprocesses; the separate local `compute/jobs`
 surface remains a privileged local operation and must not be treated as an
 untrusted multi-tenant sandbox.
+
+For a team-mode local Cell (including a first-action `exec_background` worker),
+the verified policy additionally hides the entire OpenAI4S data directory,
+other members' `users/<name>` areas in writable `OPENAI4S_DATA_ROOTS`, and the
+canonical system temporary directory where stale sibling kernel directories
+may remain. It re-exposes only the current workspace and private kernel temp as
+writable, plus exact read-only roots needed by this session: its runtime and
+authorized Skill sidecars, its owner's personal data area, and its opaque
+checksum-verified Artifact input cache. A bounded no-follow inventory refuses
+a pre-existing workspace hardlink whose other name is outside the workspace.
+Data roots that overlap the system temporary directory are rejected in team
+mode instead of silently hiding their shared/read-only content or reopening
+another user's namespace.
+
+This is a boundary around OpenAI4S-managed tenant data, **not** general hostile
+same-UID containment. The kernel retains read access to ordinary host paths
+outside those managed roots (for example unrelated files in the daemon
+account's home), and an arbitrary non-OpenAI4S process running as the daemon's
+Unix UID remains inside the operator trust boundary. Use separate OS accounts,
+containers/VMs, or equivalent resource-plane isolation when users must be
+mutually hostile at the host-filesystem level.
 
 [`openai4s.security`](../openai4s/security) adds independent policy layers:
 
@@ -31,27 +55,64 @@ untrusted multi-tenant sandbox.
 | **Biosecurity screener** | `OPENAI4S_BIOSECURITY` (on) | trajectory screener (ALLOW / ESCALATE / BLOCK) on biosecurity-relevant content |
 | **Injection detector** | `OPENAI4S_INJECTION_SCAN` (on) | annotates tool-returned content (web / PDF / MCP) so the model treats it as **data, not instructions** |
 | **Egress allowlist** | `OPENAI4S_EGRESS` (`off`) | application policy for `web_fetch` / `web_search` and authorized `host.bash`; the OS sandbox is the separate raw-network boundary |
+| **Fake-IP DNS bridge** | `OPENAI4S_ALLOW_FAKE_IP_DNS` (`off`) | accepts RFC 2544 `198.18.0.0/15` proxy answers only for a hostname in the built-in/user-approved egress catalog; IP literals and every other private/metadata range remain blocked |
 | **Remote-compute confinement** | `OPENAI4S_COMPUTE_CONFINEMENT` (`auto`) | the provider helper runs inside a real OS boundary — Seatbelt on macOS, bubblewrap on Linux — that puts the user's home out of reach — a `tmpfs` over it on Linux; on macOS a denial of `file-read-data` *and* `file-read-xattr`, since an xattr on macOS routinely holds the file's own bytes and `getxattr` was serving what `open` refused — confines writes to the job's stage directory, and (macOS) denies the keychain services, because the credential is read *by securityd* and no file rule covers that. `available()` proves it by establishing a boundary and probing it, not by `which`; the helper re-checks from inside before reading a credential and exits 71 without acting if it does not hold. **The network is deliberately not isolated** (`network_isolated: false`) — calling a provider's REST API is the helper's whole job, so outbound egress is a separate capability and is not enabled. `enforce` refuses `byoc:*` ops only where no boundary can be established: no `bwrap`/`sandbox-exec` on `PATH`, a host that fails the self-test (e.g. unprivileged user namespaces disabled), or a platform with no backend — and it refuses on *every* op, not just submit. `auto` degrades visibly in those same cases; `off` skips the wrapping entirely (see [`docs/compute.md`](compute.md)) |
 | **Secret store** | `OPENAI4S_SECRET_STORE` (`auto`) | credentials behind an opaque reference in the system keychain (after a real round-trip self-test) or the process environment; `auto` **fails closed** when neither is available. Plaintext is reachable only by asking for it by name, and no obfuscated-file fallback exists |
 | **Data-dir permissions** | always on | the data dir is `0700` and the database (plus any `-wal`/`-shm`) is `0600`; POSIX only — Windows needs an ACL, and the posture reports `supported: false` there rather than claiming a boundary |
-| **Browser response headers** | always on | a hash-based CSP with no `'unsafe-inline'` in `script-src` and a same-origin `connect-src`, plus `nosniff` / `X-Frame-Options` / `Referrer-Policy` on every response including streamed artifact bytes |
+| **Browser response headers** | always on | a static UI CSP with no inline executable scripts or `'unsafe-inline'` in `script-src`, plus a stricter response-level sandbox with `script-src 'none'` / `connect-src 'none'` on untrusted Artifact bytes; `nosniff` / `X-Frame-Options` / `Referrer-Policy` cover every response |
 
 `web_fetch` rejects loopback and private-network targets by default to reduce
 SSRF risk. `OPENAI4S_ALLOW_PRIVATE_FETCH=1` is an explicit trusted-local
 override (useful for testing a service on `127.0.0.1`); it does not weaken the
 kernel OS sandbox or authorize arbitrary worker networking.
 
+The Windows launcher separately detects Clash-style Fake-IP DNS inside WSL and
+sets the narrower `OPENAI4S_ALLOW_FAKE_IP_DNS=1` process flag. This is not a
+private-network override: only a hostname already present in the egress catalog
+(or explicitly granted by the user) may use a synthetic `198.18.0.0/15`
+answer. A literal address, an unlisted hostname, a credential-endpoint child
+hostname, loopback, link-local, metadata, and every other private range still
+fail closed.
+
 Additional enforcement: an opencode-style **permission broker** gates
 risk-bearing tools, a **secret-file guard** blocks `.env` / `*.key` / `id_rsa`
-from file tools, and file-tool paths are workspace-confined. `host.bash` binds
+from file tools. Within the explicitly trusted workspace root, the guard also
+blocks every relative path that descends through `.ssh` / `.aws` / `.gnupg` /
+`.docker` / `.kube` / `.azure` / `.config/gcloud` / `.config/gh`, whatever the
+file is called. The root itself is the trust boundary: deliberately choosing a
+workspace already inside one of those directories does not reapply its parent
+segments and make the whole workspace unusable. The guard checks the path
+obtained by resolving the caller's string, so an already-present symlink alias
+cannot hide a secret path beneath that root. On POSIX, actual file operations
+then pin the workspace and each parent with descriptor-relative (`dir_fd`,
+openat-style) traversal, use `O_NOFOLLOW` for each acquired entry, and validate
+and consume reads through the same file descriptor; writes and downloads
+publish through that pinned parent. Regular files opened for consumption with
+multiple hard links are refused rather than guessed safe. Native Windows lacks
+these required capabilities, so the affected operations fail closed instead of
+falling back to a pathname `os.replace` or check-then-open sequence. This closes
+concurrent userspace namespace-substitution windows; it is not a claim to
+withstand a compromised host kernel or arbitrary changes to kernel filesystem
+semantics.
+The alias check completes a bounded, no-follow inventory of the workspace
+before using a candidate; an unreadable, timed-out, or entry-truncated
+inventory is refused rather than treated as proof that no credential alias
+exists.
+When Stage 7 `auto_review` is enabled, the wider credential name tier is
+evaluated before even a permissive default file rule. A match is
+promoted to an audited `ask`: an attached channel shows it to a human, while a
+headless run is refused by deterministic credential policy before Guardian can
+authorize it. Recursive content search follows the same split because its
+eventual file set is discovered only after approval. File-tool paths are
+workspace-confined. `host.bash` binds
 its canonical working directory to the workspace or an explicitly trusted
 extra root, but it does not parse every command argument as a path jail:
 outside reads can remain possible, and outside writes are not an OS guarantee
 when the sandbox is off or degraded. Approval requests are durable SQLite
 records. They survive broker/daemon recreation and are resolvable by ID; the
-absence of a browser subscriber never silently allows a request. Headless
-execution defaults to deny unless the operator explicitly sets
-`OPENAI4S_UNATTENDED_APPROVAL=allow`.
+absence of a browser subscriber never silently allows a request. Outside an
+explicitly enabled Stage 7 `auto_review`, headless execution defaults to deny
+unless the operator explicitly sets `OPENAI4S_UNATTENDED_APPROVAL=allow`.
 
 A durable card is not a replay token. While the daemon is still running, a
 decision wakes the exact blocked call. After a daemon restart that thread is
@@ -94,10 +155,14 @@ workspace diff enter the audit/step records. A missing, expired, reused,
 wrong-generation, or mismatched token fails closed.
 
 User-authored Skills are likewise separated from bundled trust. Host/Web writes
-are confined to `<data_dir>/user-skills`, reject symlink/path escapes, and
-cannot shadow a bundled directory. User-space frontmatter cannot promote a
+are confined to personal or project Skill roots, reject symlink/path escapes,
+and cannot shadow a bundled directory. User-space frontmatter cannot promote a
 document to the trusted `openai4s` origin; the normal Host authoring workflow
-uses an explicit publish transition from `draft` to `personal`.
+uses an explicit publish transition from `draft` to `personal`. A model's Host
+edit asks by default because both `SKILL.md` and `kernel.py` become executable
+inputs to later turns. In team mode the Host lifecycle is admin-only even for a
+project member; deliberate human project mutations remain on the authenticated
+HTTP project boundary.
 
 ### Secret reads and secret logs
 

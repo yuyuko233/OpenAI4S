@@ -421,6 +421,34 @@ def test_code_action_is_the_only_path_that_reads_submit_completion():
     assert executed == ["print(6 * 7)\n", "host.submit_output(...)\n"]
 
 
+def test_web_revalidates_mid_cell_completion_after_gateway_capture():
+    dispatcher = SimpleNamespace(last_output=None)
+    submitted = {"output": {"answer": 42}, "completion_bullets": ["Computed it"]}
+    order = []
+
+    def execute_cell(_action):
+        order.append("capture")
+        dispatcher.last_output = submitted
+        return {"stdout": "42\n", "stderr": "", "error": None, "usage": {}}
+
+    def revalidate():
+        order.append("revalidate")
+        dispatcher.last_output = None
+        return "verified source bytes changed after submission"
+
+    dispatcher.revalidate_pending_completion = revalidate
+    outcome = _executor(dispatcher, execute_cell=execute_cell).execute(
+        CodeCell("python", "host.submit_output(...); mutate_source()\n"),
+        ModelReply(content="```python\nhost.submit_output(...)\n```"),
+        RunState([]),
+    )
+
+    assert order == ["capture", "revalidate"]
+    assert outcome.completion is None
+    assert "rejected after cell capture" in outcome.observation
+    assert "source bytes changed" in outcome.observation
+
+
 def test_code_action_executes_one_cell_and_warns_about_later_cells():
     dispatcher = SimpleNamespace(last_output=None)
     executed = []
@@ -445,6 +473,30 @@ def test_code_action_executes_one_cell_and_warns_about_later_cells():
     assert outcome.history_messages == (
         {"role": "user", "content": outcome.observation},
     )
+
+
+def test_cell_admission_precedes_pending_environment_and_execution():
+    order = []
+
+    def refuse(action):
+        order.append(("admit", action.language))
+        raise RuntimeError("environment not ready")
+
+    executor = _executor(
+        SimpleNamespace(last_output=None),
+        admit_cell=refuse,
+        apply_pending=lambda: order.append(("apply", None)),
+        execute_cell=lambda action: order.append(("execute", action.language)),
+    )
+
+    with pytest.raises(RuntimeError, match="environment not ready"):
+        executor.execute(
+            CodeCell("python", "print(42)\n"),
+            ModelReply(content="```python\nprint(42)\n```"),
+            RunState([]),
+        )
+
+    assert order == [("admit", "python")]
 
 
 def test_code_action_warns_when_a_complete_cell_has_an_incomplete_tail():

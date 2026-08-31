@@ -5,6 +5,7 @@ import importlib.util
 import json
 import re
 import sys
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -59,12 +60,19 @@ def _import_skill():
     }
 
 
-def _graph_payload(html):
+def _andor_payload_json(html):
     match = re.search(
-        r'<script type="application/json" id="andor-data">(.*?)</script>', html
+        r"const graph = JSON\.parse\(/\* openai4s-andor-data \*/ (.*?)\)\.graph;\n"
+        r"  graph\.nodes\.forEach",
+        html,
+        flags=re.DOTALL,
     )
     assert match
-    return json.loads(match.group(1))["graph"]
+    return json.loads(match.group(1))
+
+
+def _graph_payload(html):
+    return json.loads(_andor_payload_json(html))["graph"]
 
 
 def _svg_source_text(source):
@@ -74,21 +82,21 @@ def _svg_source_text(source):
     return base64.b64decode(source.removeprefix(prefix)).decode("utf-8")
 
 
-def _assert_no_duplicate_structure_uris(html, *, check_runtime=True):
-    """An `onerror` fallback is emitted only when it differs from its own primary.
+def _assert_structure_uris_are_canonical(html):
+    """Every depiction is one canonical, self-contained SVG data URI.
 
-    Without RDKit the primary *is* the placeholder, so carrying a fallback would
-    embed the identical base64 payload twice on every molecule. Runtime checks
-    apply only to HTML rendered in this test environment; committed examples may
-    have been generated in a different optional-dependency environment.
+    The producer already substitutes a placeholder if RDKit is unavailable, so
+    a second DOM-loaded fallback only duplicates bytes and creates a URL sink.
     """
-    tags = re.findall(r"<(?:img|image)\b[^>]*?data-fallback-src[^>]*?>", html)
-    for tag in tags:
-        primary = re.search(r'(?:^|\s)(?:src|href)="([^"]+)"', tag).group(1)
-        fallback = re.search(r'data-fallback-src="([^"]+)"', tag).group(1)
-        assert fallback != primary, "fallback duplicates the primary structure URI"
-    if check_runtime and importlib.util.find_spec("rdkit") is None:
-        assert not tags, "without RDKit no fallback should be emitted at all"
+    assert "data-fallback-src" not in html
+    assert "dataset.fallbackSrc" not in html
+    sources = re.findall(r'(?:src|href)="(data:image/svg\+xml;base64,[^"]+)"', html)
+    assert sources
+    prefix = "data:image/svg+xml;base64,"
+    for source in sources:
+        encoded = source.removeprefix(prefix)
+        decoded = base64.b64decode(encoded, validate=True)
+        assert base64.b64encode(decoded).decode("ascii") == encoded
 
 
 ROUTE_PAYLOAD = {
@@ -181,6 +189,289 @@ def test_retrosynthesis_skill_is_searchable():
     assert any(hit["name"] == "retrosynthesis_planning" for hit in hits)
 
 
+def test_model_backed_reaction_tasks_are_separate_discoverable_skills():
+    skills = SkillLoader().discover()
+    expected = {
+        "single-step-retrosynthesis": "RetroChimera",
+        "retrosynthesis_planning": "AiZynthFinder",
+        "reaction-forward-prediction": "ReactionT5v2-forward",
+        "reaction-atom-mapping": "RXNMapper",
+        "reaction-condition-recommendation": "Parrot",
+        "reaction-yield-estimation": "ReactionT5v2-yield",
+    }
+
+    for name, model in expected.items():
+        assert name in skills
+        body = skills[name].doc
+        assert model in body
+
+    assert "complete reaction" in skills["reaction-atom-mapping"].description
+    assert "fully specified" in skills["reaction-yield-estimation"].description
+    assert "Do not recurse" in skills["single-step-retrosynthesis"].doc
+
+
+def test_science_scenario_specifies_six_independent_problem_contracts():
+    scenario = (
+        get_config().skills_dir / "retrosynthesis_planning" / "SCENARIO_zh.md"
+    ).read_text(encoding="utf-8")
+
+    assert scenario.count("### Science Query") == 6
+    for heading in (
+        "## Problem 1. 单步逆合成前体生成",
+        "## Problem 2. 多步逆合成路线规划",
+        "## Problem 3. 反应原子映射与反应中心识别",
+        "## Problem 4. 正向反应产物预测与 round-trip 验证",
+        "## Problem 5. 反应条件推荐",
+        "## Problem 6. 反应收率估计",
+        "## 全 Scenario 的硬性约束",
+    ):
+        assert heading in scenario
+    assert "不是一个单模型问题" in scenario
+    assert "不应被写成一条固定 pipeline" in scenario
+
+
+def test_six_detailed_science_scenarios_are_independent_benchmark_specs():
+    scenario_dir = get_config().skills_dir / "retrosynthesis_planning" / "scenarios"
+    expected = (
+        "01_single_step_retrosynthesis.md",
+        "02_multistep_route_planning.md",
+        "03_atom_mapping.md",
+        "04_forward_prediction.md",
+        "05_condition_recommendation.md",
+        "06_yield_estimation.md",
+    )
+    distinguishing_conditions = {
+        "01_single_step_retrosynthesis.md": "跨类别 disconnection search",
+        "02_multistep_route_planning.md": "budgeted search policy",
+        "03_atom_mapping.md": "对称原子置换",
+        "04_forward_prediction.md": "outcome prediction",
+        "05_condition_recommendation.md": "condition tuple",
+        "06_yield_estimation.md": "worst-group",
+    }
+    required_sections = (
+        "## Scenario Overview",
+        "## 数据可获取性与 Benchmark 构建方案",
+        "## Science Query",
+        "## 阶段介绍",
+        "## Input Data 与 Ground Truth 组织",
+        "## `intermediate_results.json` 最低要求",
+        "## 建议的 Reference Repository 结构",
+        "## 评估自动化实现难度",
+        "## 评测指标",
+        "## 代码与数据的硬性约束",
+        "## Domain-Specific Failure Cases",
+        "## 参考文献与一手资源",
+    )
+
+    for filename in expected:
+        body = (scenario_dir / filename).read_text(encoding="utf-8")
+        for heading in required_sections:
+            assert heading in body, f"{filename} is missing {heading}"
+        assert "private_evaluator/" in body
+        assert "Ground Truth" in body
+        assert distinguishing_conditions[filename] in body
+
+    assert (scenario_dir / "README.md").exists()
+    assert (scenario_dir / "README_zh.md").exists()
+
+
+def _single_step_benchmark():
+    sys.path.insert(0, str(get_config().skills_dir))
+    from retrosynthesis_planning import single_step_benchmark  # noqa: PLC0415
+
+    return single_step_benchmark
+
+
+def _toy_canonicalizer(smiles):
+    value = smiles.strip()
+    if value == "not-smiles":
+        raise ValueError("invalid fixture molecule")
+    aliases = {
+        "OCC": "CCO",
+        "CN": "CN",
+        "NC": "CN",
+    }
+    return aliases.get(value, value)
+
+
+def test_class_unknown_benchmark_rejects_hidden_reaction_fields():
+    benchmark = _single_step_benchmark()
+
+    with pytest.raises(benchmark.SingleStepProtocolError, match="class-unknown"):
+        benchmark.validate_public_targets(
+            [
+                {
+                    "target_id": "target-1",
+                    "product_smiles": "CCOC=O",
+                    "reaction_class": "1",
+                }
+            ],
+            canonicalizer=_toy_canonicalizer,
+        )
+
+
+def test_single_step_benchmark_preserves_invalid_and_duplicate_beams():
+    benchmark = _single_step_benchmark()
+    targets = benchmark.validate_public_targets(
+        [{"target_id": "target-1", "product_smiles": "CCOC=O"}],
+        canonicalizer=_toy_canonicalizer,
+    )
+    normalized = benchmark.normalize_prediction_payloads(
+        targets,
+        [
+            {
+                "target_id": "target-1",
+                "predictions": [
+                    {"rank": 1, "reactants_smiles": "N.OCC", "score": 0.7},
+                    {"rank": 2, "reactants_smiles": "CCO.N", "score": 0.6},
+                    {"rank": 3, "reactants_smiles": "", "score": 0.2},
+                    {"rank": 4, "reactants_smiles": None, "score": None},
+                    {
+                        "rank": 5,
+                        "reactants_smiles": "not-smiles",
+                        "score": 0.1,
+                    },
+                ],
+            }
+        ],
+        top_k=5,
+        canonicalizer=_toy_canonicalizer,
+    )
+
+    beams = normalized[0].predictions
+    assert [beam.status for beam in beams] == [
+        "valid",
+        "valid",
+        "empty",
+        "invalid",
+        "invalid",
+    ]
+    assert beams[0].signature == "CCO.N"
+    assert beams[1].signature == "CCO.N"
+    assert beams[1].duplicate_of_rank == 1
+    assert len(beams) == 5
+
+
+def test_single_step_private_evaluator_scores_targets_before_aggregation():
+    benchmark = _single_step_benchmark()
+    targets = benchmark.validate_public_targets(
+        [
+            {"target_id": "target-1", "product_smiles": "CCOC=O"},
+            {"target_id": "target-2", "product_smiles": "CCBr"},
+        ],
+        canonicalizer=_toy_canonicalizer,
+    )
+    predictions = benchmark.normalize_prediction_payloads(
+        targets,
+        [
+            {
+                "target_id": "target-1",
+                "predictions": [
+                    {"rank": 1, "reactants_smiles": "N.OCC", "score": 0.7},
+                    {"rank": 2, "reactants_smiles": "Cl.C", "score": 0.2},
+                ],
+            },
+            {
+                "target_id": "target-2",
+                "predictions": [
+                    {"rank": 1, "reactants_smiles": "not-smiles", "score": 0.6},
+                    {"rank": 2, "reactants_smiles": "Br.C", "score": 0.4},
+                ],
+            },
+        ],
+        top_k=3,
+        canonicalizer=_toy_canonicalizer,
+    )
+    references = benchmark.normalize_references(
+        targets,
+        [
+            {
+                "target_id": "target-1",
+                "precursor_sets": ["CCO.N", "C.I"],
+            },
+            {"target_id": "target-2", "precursor_sets": ["C.Br"]},
+        ],
+        canonicalizer=_toy_canonicalizer,
+    )
+
+    metrics = benchmark.evaluate_predictions(predictions, references, top_k=3)
+
+    assert metrics["top_k_exact_match_accuracy"] == {"1": 0.5, "3": 1.0}
+    assert metrics["multi_reference_recall_at_k"] == {"1": 0.25, "3": 0.75}
+    assert metrics["mean_reciprocal_rank"] == 0.75
+    assert metrics["invalid_prediction_rate"] == 0.25
+    assert metrics["unused_budget_slot_rate"] == pytest.approx(1 / 3)
+    assert [row["first_hit_rank"] for row in metrics["targets"]] == [1, 2]
+
+
+def test_single_step_benchmark_cli_writes_public_and_private_artifacts(tmp_path):
+    benchmark = _single_step_benchmark()
+    targets_path = tmp_path / "targets.csv"
+    predictions_path = tmp_path / "predictions.jsonl"
+    references_path = tmp_path / "references.jsonl"
+    intermediate_path = tmp_path / "intermediate_results.json"
+    metrics_path = tmp_path / "metrics.json"
+    targets_path.write_text(
+        "target_id,product_smiles\ntarget-1,CCOC=O\n", encoding="utf-8"
+    )
+    predictions_path.write_text(
+        json.dumps(
+            {
+                "target_id": "target-1",
+                "predictions": [{"rank": 1, "reactants_smiles": "N.OCC", "score": 0.7}],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    references_path.write_text(
+        json.dumps({"target_id": "target-1", "precursor_sets": ["CCO.N"]}) + "\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        benchmark.main(
+            [
+                "normalize",
+                "--targets",
+                str(targets_path),
+                "--predictions",
+                str(predictions_path),
+                "--output",
+                str(intermediate_path),
+                "--top-k",
+                "3",
+            ],
+            canonicalizer=_toy_canonicalizer,
+        )
+        == 0
+    )
+    assert (
+        benchmark.main(
+            [
+                "evaluate",
+                "--targets",
+                str(targets_path),
+                "--predictions",
+                str(predictions_path),
+                "--references",
+                str(references_path),
+                "--output",
+                str(metrics_path),
+                "--top-k",
+                "3",
+            ],
+            canonicalizer=_toy_canonicalizer,
+        )
+        == 0
+    )
+    intermediate = json.loads(intermediate_path.read_text(encoding="utf-8"))
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    assert intermediate["task_condition"] == "reaction_class_unknown"
+    assert intermediate["targets"][0]["predictions"][0]["signature"] == "CCO.N"
+    assert metrics["top_k_exact_match_accuracy"] == {"1": 1.0, "3": 1.0}
+
+
 def test_aspirin_example_dashboard_is_documented():
     skill_root = get_config().skills_dir / "retrosynthesis_planning"
     skill_doc = (skill_root / "SKILL.md").read_text(encoding="utf-8")
@@ -214,7 +505,7 @@ def test_aspirin_example_dashboard_is_documented():
         "structure renderer fallback" not in _svg_source_text(source)
         for source in molecule_sources
     )
-    _assert_no_duplicate_structure_uris(html, check_runtime=False)
+    _assert_structure_uris_are_canonical(html)
 
 
 def test_normalize_and_rank_routes():
@@ -250,8 +541,6 @@ def test_render_html_and_report():
     assert "Route Ranking" in html
     assert "Interactive Retrosynthesis Knowledge Graph" in html
     assert 'id="andor-data"' in html
-    assert '"graph"' in html
-    assert '"mol:CC(=O)Oc1ccccc1C(=O)O"' in html
     assert 'id="andor-svg"' in html
     assert "Not predicted in this AiZynthFinder route export" in html
     assert "Molecule Briefs" in html
@@ -271,13 +560,9 @@ def test_render_html_and_report():
     assert "structure-frame" in html
     assert "structure-well" in html
     assert "data:image/svg+xml;base64" in html
-    _assert_no_duplicate_structure_uris(html)
+    _assert_structure_uris_are_canonical(html)
     assert "pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles" not in html
-    match = re.search(
-        r'<script type="application/json" id="andor-data">(.*?)</script>', html
-    )
-    assert match
-    graph = json.loads(match.group(1))["graph"]
+    graph = _graph_payload(html)
     assert (
         sum(node["id"] == "mol:CC(=O)Oc1ccccc1C(=O)O" for node in graph["nodes"]) == 1
     )
@@ -318,8 +603,9 @@ def test_molecule_briefs_and_query_urls():
     assert target["role"] == "target"
     assert precursor["role"] == "stock precursor"
     assert precursor["stock_status"] == "in stock"
-    assert "PubChem" not in precursor["pubchem_url"]
-    assert "pubchem.ncbi.nlm.nih.gov" in precursor["pubchem_url"]
+    pubchem_url = urlsplit(precursor["pubchem_url"])
+    assert pubchem_url.scheme == "https"
+    assert pubchem_url.hostname == "pubchem.ncbi.nlm.nih.gov"
     assert funcs["build_pubchem_query_url"]("CC O").endswith("CC%20O")
     assert "PNG?image_size=260x180" in funcs["build_pubchem_structure_image_url"](
         "CC O"
@@ -335,6 +621,10 @@ def test_molecule_briefs_and_query_urls():
 def test_rdkit_structure_depiction_when_available():
     if importlib.util.find_spec("rdkit") is None:
         pytest.skip("RDKit is an optional chemistry dependency")
+    try:
+        from rdkit.Chem import Draw  # noqa: F401
+    except ImportError:
+        pytest.skip("RDKit drawing support is unavailable in this environment")
 
     funcs = _import_skill()
     svg = _svg_source_text(
@@ -764,10 +1054,7 @@ def test_complex_multistep_routes_keep_structures_visible():
         max_routes=5,
         llm=fake_llm,
     )
-    graph_json = re.search(
-        r'<script type="application/json" id="andor-data">(.*?)</script>', html
-    ).group(1)
-    graph = json.loads(graph_json)["graph"]
+    graph = _graph_payload(html)
 
     assert len(graph["nodes"]) >= 9
     assert sum(node["id"] == f"mol:{target}" for node in graph["nodes"]) == 1
@@ -777,7 +1064,7 @@ def test_complex_multistep_routes_keep_structures_visible():
     assert "Chemoselective bond-forming disconnection" in html
     assert "late-stage-intermediate" in html
     assert "data:image/svg+xml;base64" in html
-    _assert_no_duplicate_structure_uris(html)
+    _assert_structure_uris_are_canonical(html)
     assert "0.0 Unrecognized" not in html
 
 
@@ -912,11 +1199,66 @@ def test_graph_payload_escapes_html_delimiters():
     hostile = {"routes": {"1": {"route_strategy": "<!--<script>alert(1)</script>-->"}}}
     html = funcs["render_route_tree_html"](ranked, annotations=hostile)
 
-    raw = re.search(
-        r'<script type="application/json" id="andor-data">(.*?)</script>', html
-    ).group(1)
+    raw = _andor_payload_json(html)
     assert "<" not in raw and ">" not in raw
     assert json.loads(raw)  # still valid JSON after escaping
+
+
+def test_structure_sources_never_round_trip_through_mutable_dom_state():
+    funcs = _import_skill()
+    ranked = funcs["rank_routes"](funcs["normalize_routes"](ROUTE_PAYLOAD))
+    html = funcs["render_route_tree_html"](ranked)
+
+    assert "JSON.parse(dataEl.textContent)" not in html
+    assert "data-fallback-src" not in html
+    assert "dataset.fallbackSrc" not in html
+    assert "/* openai4s-andor-data */" in html
+    assert "const graph = JSON.parse(/* openai4s-andor-data */" in html
+    assert "safeStructureSource" in html
+    assert "return encodeURI(source)" in html
+
+
+def test_structure_source_allowlist_is_exact_and_canonical():
+    funcs = _import_skill()
+    guard = funcs["render_route_tree_html"].__globals__["_canonical_structure_src"]
+    encoded = base64.b64encode(b"<svg/>").decode("ascii")
+    valid = "data:image/svg+xml;base64," + encoded
+
+    assert guard(valid) == valid
+    for invalid in (
+        "javascript:alert(1)",
+        "Data:image/svg+xml;base64," + encoded,
+        "data:image/svg+xml;charset=utf-8;base64," + encoded,
+        " data:image/svg+xml;base64," + encoded,
+        "data:image/svg+xml;base64,%3Csvg%2F%3E",
+        "data:image/svg+xml;base64,PHN2\r\nZy8+",
+        "data:image/svg+xml;base64,AB==",
+        "data:image/svg+xml;base64,not padding",
+    ):
+        assert guard(invalid) == ""
+
+
+def test_an_oversized_depiction_degrades_to_the_labelled_placeholder():
+    """`_canonical_structure_src`'s 1 MiB cap is production-reachable.
+
+    A ~2 kB peptide SMILES renders to a >1 MiB RDKit data URI, which the guard
+    rejects. Without a fallback the briefs panel emitted `<img src="">`, which
+    resolves to the document's own URL and re-requests the whole dashboard as
+    an image; the SVG tree and the graph payload dropped the depiction with no
+    explanation at all.
+    """
+    pytest.importorskip("rdkit")
+    funcs = _import_skill()
+    module = funcs["render_route_tree_html"].__globals__
+    oversized = "N" + "C(=O)C(N)Cc1ccccc1" * 120 + "O"
+
+    raw = module["build_molecule_structure_src"](oversized)
+    assert len(raw) > (1 << 20), "the cap is no longer reachable; revisit this test"
+    assert module["_canonical_structure_src"](raw) == ""
+
+    src = module["_structure_src"](oversized)
+    assert src.startswith("data:image/svg+xml;base64,")
+    assert "structure renderer fallback" in _svg_source_text(src)
 
 
 def test_molecule_briefs_warn_when_truncated():

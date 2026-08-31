@@ -1,14 +1,23 @@
 ---
 name: retrosynthesis_planning
-description: industrial retrosynthesis planning pipeline for target SMILES; run AiZynthFinder, normalize route JSON, query route molecules, rank routes, render figure-style route dashboards, and write analyst reports with retrosynthetic rationale.
+description: Search multi-step retrosynthesis routes from a target to stock with AiZynthFinder, then audit and rank route trees. Use for recursive planning, not mapping, forward prediction, conditions, or yield.
 origin: openai4s
 category: chemistry
 ---
 # Skill: retrosynthesis planning
 
-Use this skill when a task asks for retrosynthetic analysis, synthesis route
-planning, purchasable precursor search, route-tree visualization, molecule
-lookup, or a medicinal chemistry synthesis feasibility summary.
+This Skill owns one scientific problem: multi-step search from a target molecule
+to a declared purchasable or in-house stock. It also provides engineering review
+functions for the returned route trees. It does not redefine single-step
+prediction, forward outcome prediction, atom mapping, condition recommendation,
+or yield estimation as phases of one model.
+
+Use `single-step-retrosynthesis` to inspect a single disconnection directly,
+`reaction-forward-prediction` for round-trip product recovery,
+`reaction-atom-mapping` for changed bonds on a complete reaction,
+`reaction-condition-recommendation` for condition hypotheses, and
+`reaction-yield-estimation` for a bounded yield-screening signal. The audited
+task/model selection is in `MODEL_TASKS.md`.
 
 The recommended backend is AiZynthFinder running in a separate environment. This
 skill keeps OpenAI4S core dependency-free: the helper module is pure stdlib and
@@ -20,13 +29,67 @@ environments before generating visual reports:
 uv sync --extra science --extra chemistry
 ```
 
+For optional RetroChimera single-step proposals, use `model_deployment.py` to
+verify and safely extract a reviewed public checkpoint, then call it through
+`SyntheseusBackend`; never place model weights in the Skill directory. When a
+checkpoint must be fetched from a Python cell, use its `download_checkpoint`
+helper, which routes bytes through `host.web_download`; do not add a raw
+`urllib`, `requests`, or socket download to the Skill.
+
 RDKit is not required to plan, rank, or review routes. If the chemistry extra is
 unavailable on the current platform, omit it; the dashboard falls back to
 transparent local SVG placeholders while the rest of the skill remains usable.
 
+## Scenario 2 benchmark contract
+
+For a frozen target set, stock, route budget, and private reference routes, use
+`multistep_benchmark.py`. Call `validate_targets` and `normalize_stock`, run the
+planner, then pass its complete output through `normalize_planner_outputs` and
+`evaluate_routes`. The verifier recomputes solution state using molecule-OR and
+reaction-AND semantics; a backend `solved=true` flag is never trusted. Preserve
+search statistics, termination reason, failed routes, duplicates, and budget
+violations in the intermediate artifact.
+
+## Cross-model route admission gate
+
+Treat planner `solved=true` as stock closure, not reaction feasibility. For a
+route proposed for deeper review, freeze one route before validation and apply
+these independent checks to every reaction node:
+
+1. map the fixed reactant/product pair and flag low mapping confidence;
+2. generate condition hypotheses as complete joint beams, without inventing
+   temperature or missing slots;
+3. run forward Top-K prediction using a predeclared condition beam and compare
+   canonical products;
+4. preserve invalid products, model disagreement, low policy probability, and
+   low template occurrence as failures rather than reranking them away;
+5. reject or hold the whole route when a critical step lacks forward support.
+
+Bounded diagnostics may compare no-condition input with a fixed number of
+condition beams, but must not search conditions indefinitely until the intended
+product appears. Record the tested budget and every result. Never report a
+route as experimentally ready merely because all leaves are in stock. Do not
+run a quarantined yield model or use its number to rescue a failed route.
+
+## Path and reproducibility hygiene
+
+Keep public artifacts path-free. Use `OPENAI4S_REPOSITORY`,
+`OPENAI4S_RETRO_MODEL_ROOT`, `OPENAI4S_RETRO_DATA_ROOT`, and
+`OPENAI4S_RETRO_RUN_DIR` at execution time; do not serialize usernames, home
+directories, mount points, temporary directories, credentials, or environment
+prefixes into reports. Model manifests should contain logical artifact IDs,
+versions, licenses, sizes, and hashes.
+
+Before sharing a reproducibility ZIP, use `reproducibility_bundle.py` to scan a
+prepared path-free directory and build a deterministic archive. Include source,
+configuration, environment specifications, manifests, summaries, and bounded
+result JSON. Exclude checkpoints, stocks, caches, credentials, and complete
+binary environments unless redistribution is explicitly authorized. A binary
+environment archive is not a substitute for an environment specification.
+
 ## Capability summary
 
-This skill implements a complete retrosynthesis review pipeline:
+This skill implements multi-step search plus route-review support:
 
 1. build a reproducible `aizynthcli` command for a target SMILES
 2. load AiZynthFinder JSON exports
@@ -37,8 +100,17 @@ This skill implements a complete retrosynthesis review pipeline:
 6. call the configured conversation LLM (`host.llm`) for route, molecule, and
    reaction annotations
 7. render a self-contained HTML dashboard with route ranking, molecule
-   structures, an interactive retrosynthesis knowledge graph, route cards, and
-   a Markdown analyst report
+   structures, a retrosynthesis knowledge graph (interactive in a downloaded
+   copy — see below), route cards, and a Markdown analyst report
+
+**The knowledge graph is interactive only in a downloaded copy.** Artifact
+HTML is model-authored, so the daemon serves it with `script-src 'none'` inside
+a sandbox with no `allow-scripts`, and the Workbench frames previews the same
+way — running it on the origin that holds the session cookie is the one thing
+that policy exists to prevent. In the Workbench and at `/preview/<id>` the
+dashboard renders its panels, tables and SVG trees but the graph does not draw;
+download the file and open it from the filesystem to expand, collapse and
+inspect nodes. The preview says so rather than showing an empty canvas.
 
 The dashboard is intended for chemist review and route triage. It does not
 claim experimental validation. Conditions, yield ranges, route verdicts, and
@@ -72,15 +144,48 @@ and a render-then-verify QA pass.
 Create the backend once outside OpenAI4S:
 
 ```bash
-conda create -n retro python=3.11 -y
-conda activate retro
-python -m pip install "aizynthfinder[all]"
-mkdir -p ~/Documents/Openai4S/retro_data
-download_public_data ~/Documents/Openai4S/retro_data
+MODEL_ROOT="$PWD/models"
+uv run python skills/retrosynthesis_planning/reaction_model_deployment.py plan \
+  aizynthfinder-4.4.1 --root "$MODEL_ROOT"
+conda create --prefix "$MODEL_ROOT/envs/aizynthfinder-4.4.1" python=3.11 pip -y
+conda run --prefix "$MODEL_ROOT/envs/aizynthfinder-4.4.1" \
+  python -m pip install "aizynthfinder[all]==4.4.1"
+conda run --prefix "$MODEL_ROOT/envs/aizynthfinder-4.4.1" \
+  download_public_data "$MODEL_ROOT/artifacts/aizynthfinder-4.4.1"
 ```
 
-The public-data command writes a `config.yml` file. Keep model files and stock
-files out of git.
+The public-data command writes a `config.yml` file. Snapshot the whole policy,
+template, filter, stock, and config tree with `reaction_model_deployment.py
+snapshot`, and verify that manifest before each benchmark. The registry pins
+AiZynthFinder 4.4.1, its release commit, and the PyPI wheel SHA-256. Public-data
+files remain separately versioned artifacts whose terms and hashes must be
+reviewed after download. Keep environments, caches, models, and stock out of git.
+
+The isolated JSON backend now executes the search directly, so Scenario 2 does
+not need to scrape the CLI. Supply a manifest whose SHA-256 identifies the whole
+reviewed public-data snapshot:
+
+```python
+from retrosynthesis_planning.reaction_model_backends import ReactionModelBackend
+
+planner = ReactionModelBackend(
+    "aizynthfinder",
+    manifest="/models/aizynthfinder/model-manifest.json",
+    python_command=("/models/aizynthfinder/env/bin/python",),
+    timeout_seconds=1800,
+)
+search = planner.plan_routes(
+    [{"target_id": "target-01", "target_smiles": "CC(=O)Oc1ccccc1C(=O)O"}],
+    config_path="/models/aizynthfinder/config.yml",
+    max_routes=10,
+)
+```
+
+The result already uses the Scenario 2 boundary: one record per target with
+`routes`, `termination_reason`, and `search_stats`. An individual target failure
+returns `termination_reason="backend_error"` and a scrubbed diagnostic while
+the remaining batch continues. The evaluator must still recompute solved state
+with reaction-AND/molecule-OR semantics; it must not trust backend metadata.
 
 ## Import
 
@@ -265,7 +370,7 @@ verification status before using it in execution scoring.
 ### Phase 4 — Visualize and report
 
 The HTML artifact is a self-contained dashboard: KPI summary, ranked route
-table, an interactive retrosynthesis knowledge graph, molecule briefs,
+table, a retrosynthesis knowledge graph, molecule briefs,
 color-coded SVG route trees with molecule structure thumbnails, stock precursor
 chips, and a text outline for audit/debugging. The knowledge graph merges
 identical molecule nodes across displayed routes, preserves AND-OR route
@@ -338,8 +443,8 @@ http://127.0.0.1:9876/examples/aspirin_retrosynthesis.html
 The aspirin example demonstrates:
 
 - Route X cards with embedded route-level LLM analysis
-- an interactive retrosynthesis knowledge graph with merged molecule and
-  reaction nodes
+- a retrosynthesis knowledge graph with merged molecule and reaction nodes,
+  interactive in a downloaded copy
 - reaction detail panels with LLM reaction type, proposed conditions, yield
   caveats, selectivity risks, safety notes, and validation steps
 - Molecule Briefs using RDKit/local SVG visualization rather than PubChem PNGs

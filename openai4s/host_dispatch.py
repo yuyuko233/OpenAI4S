@@ -20,13 +20,14 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 
 from openai4s.config import Config, get_config
 from openai4s.doubao_search import DoubaoSearchService
 from openai4s.host.bash import BashAuthorizationService, redact_shell_text
+from openai4s.host.code_evidence import gather_code_evidence_context
 from openai4s.host.completion import CompletionService, gather_submission_evidence
 from openai4s.host.credentials import CredentialService
 from openai4s.host.data import HostDataService
@@ -63,6 +64,45 @@ from openai4s.tools.registry import (
     format_tool_result,
     get_tool_by_host_method,
 )
+
+
+class _HeadlessArtifactWriterCoordinator:
+    """Always-on foreground/background exclusion for CLI composition."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._backgrounds = 0
+        self._mutation = False
+
+    @contextmanager
+    def background(self) -> Iterator[None]:
+        with self._lock:
+            if self._mutation:
+                raise RuntimeError(
+                    "background execution cannot start during an Artifact mutation"
+                )
+            self._backgrounds += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._backgrounds = max(0, self._backgrounds - 1)
+
+    @contextmanager
+    def foreground_mutation(self, *, execution_bound: bool) -> Iterator[None]:
+        if not execution_bound:
+            raise RuntimeError(
+                "Artifact mutation requires a foreground execution scope"
+            )
+        with self._lock:
+            if self._backgrounds or self._mutation:
+                raise RuntimeError("another Artifact writer is already running")
+            self._mutation = True
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._mutation = False
 
 
 # --------------------------------------------------------------------------- #
@@ -213,6 +253,14 @@ def _step_begin(method: str, args: list) -> tuple[str, str, dict] | None:
     if method == "load_skill":
         name = args[0] if args and isinstance(args[0], str) else a.get("name", "")
         return ("skill", f"Loading {name} skill guidance", {"name": name})
+    if method == "skills_read":
+        # Distinct from load_skill on purpose: loading pulls a Skill's whole
+        # SKILL.md recipe into context, while this reads ONE file inside that
+        # Skill's directory (a reference document, a data contract, an
+        # example). A card that said "loaded" for both hid which one happened.
+        name = str(a.get("name") or "")
+        path = str(a.get("path") or "SKILL.md")
+        return ("skill", f"Reading {name}/{path}", {"name": name, "path": path})
     if method in {"skills_status", "skills_history", "skills_rollback"}:
         name = a.get("name", "")
         verb = {
@@ -293,6 +341,14 @@ def _step_begin(method: str, args: list) -> tuple[str, str, dict] | None:
         )
     if method == "remote_gpu_status":
         return ("compute", "Inspecting remote GPU setup", {})
+    if method == "accelerator_status":
+        return ("compute", "Inspecting local and remote accelerators", {})
+    if method == "stage_model_asset":
+        return (
+            "compute",
+            "Staging a local model asset",
+            {"source_path": a.get("source_path"), "asset_name": a.get("asset_name")},
+        )
     if method == "register_remote_capability":
         cap = a.get("capability") or a.get("cap") or "service"
         alias = a.get("alias") or "remote GPU"
@@ -500,18 +556,276 @@ def _gate_target(method: str, args: list) -> str:
     return ""
 
 
+_GUARDIAN_FILE_PATH_KEYS = {
+    "read_file": "path",
+    "write_file": "path",
+    "edit_file": "path",
+    "glob": "path",
+    "grep": "path",
+    "list_dir": "path",
+    "web_download": "path",
+    "save_artifact": "path",
+    "materialise_artifact": "filename",
+}
+_GUARDIAN_FILE_PATH_DEFAULTS = {
+    "glob": ".",
+    "grep": ".",
+    "list_dir": ".",
+}
+
+
+def _guardian_file_review(
+    method: str,
+    args: list,
+    files: WorkspaceFileService,
+    config: Config,
+    approvals_reviewer: str | None = None,
+) -> tuple[str | None, bool]:
+    """Resolve a stable target and wider alias verdict for auto-review.
+
+    Permission targets are sometimes patterns, domains, or version ids. The
+    actual file argument is resolved separately so a harmless alias cannot
+    hide an unattended-only basename such as ``config.json``. Resolution here
+    is advisory input to Guardian; the owning service still resolves again at
+    the sink and remains the confinement authority.
+    """
+    key = _GUARDIAN_FILE_PATH_KEYS.get(method)
+    try:
+        from openai4s.server.guardian_enforce import (
+            auto_review_requested,
+            feature_enabled,
+        )
+
+        if not feature_enabled(config) or not auto_review_requested(
+            config, approvals_reviewer
+        ):
+            return None, False
+    except Exception:  # noqa: BLE001 - an active broker will fail closed below
+        return None, True
+    spec = args[0] if args and isinstance(args[0], dict) else {}
+    value = spec.get(key) if key is not None else None
+    if value in (None, ""):
+        value = _GUARDIAN_FILE_PATH_DEFAULTS.get(method)
+    if value in (None, ""):
+        return None, False
+    try:
+        path = Path(str(value))
+        is_credential = files.resolved_credential_checker()(path)
+        target = (path if path.is_absolute() else files.workspace() / path).resolve()
+        relative = files.relative(target)
+        if relative is None:
+            return None, True
+        return relative, is_credential
+    except (OSError, RuntimeError, ValueError):
+        # The service will return the authoritative refusal. If automatic
+        # review is active, inability to establish the wider alias verdict is
+        # itself evidence that Guardian must not authorize the action.
+        return None, True
+
+
+def _secret_pre_gate_path(
+    target: str,
+    files: WorkspaceFileService,
+) -> str:
+    """Classify an absolute in-workspace target relative to the trusted root."""
+
+    path = Path(target)
+    if path.is_absolute():
+        confined = files.relative(path)
+        if confined is not None:
+            return confined
+    return target
+
+
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}" + ("" if n == 1 else "s")
 
 
+def _declared_failure_reason(result: Any) -> str | None:
+    """The failure a handler result declares about itself, if any.
+
+    Handlers signal failure two ways: the single-key ``{"error"}`` soft-fail,
+    and a structured result carrying ``ok: False`` with the detail in
+    ``failed`` entries or a log tail (`preinstall.install`, `host.fold`). The
+    projection must read both — a failed ``env_setup`` whose result said
+    ``ok: false`` used to fall through to the success branch and render the
+    literal word "ready" over an install that never happened.
+    """
+    if not isinstance(result, dict):
+        return None
+    err = result.get("error")
+    if err:
+        return str(err)
+    if result.get("ok") is not False:
+        return None
+    failures = result.get("failed")
+    if isinstance(failures, list):
+        for row in failures:
+            if isinstance(row, dict) and row.get("error"):
+                return str(row["error"])
+            if isinstance(row, str) and row:
+                return row
+    log = result.get("log")
+    if isinstance(log, str) and log.strip():
+        return log.strip()[-600:]
+    return "reported ok=false"
+
+
+#: Delegate step status by the envelope's machine-readable task_status.
+#: Green ("done") is reserved for a child that declared completion and had it
+#: upheld by machine checks; everything not-done-but-not-broken is "warning".
+_DELEGATE_STEP_STATUS: dict[str, str] = {
+    "completed": "done",
+    "partial": "warning",
+    "blocked": "warning",
+    "failed": "error",
+}
+_DELEGATE_STEP_SEVERITY: dict[str, int] = {"done": 0, "warning": 1, "error": 2}
+
+
+def _delegate_result_status(result: Any) -> str:
+    """done/warning/error for one child result (envelope or async handle)."""
+    if not isinstance(result, dict):
+        return "error"  # malformed: no declared outcome at all
+    task_status = result.get("task_status")
+    if isinstance(task_status, str):
+        return _DELEGATE_STEP_STATUS.get(task_status, "error")
+    if result.get("stop_reason") in ("stopped", "cancelled", "max_turns"):
+        return "warning"
+    if result.get("error"):
+        return "error"
+    if result.get("status") in ("pending", "running"):
+        # wait=false handle: the spawn succeeded; the verdict is tracked in
+        # the delegation panel, not on this card.
+        return "done"
+    return "error"
+
+
+def _delegate_result_word(result: Any) -> str:
+    """The one-line summary word — the task_status itself, never 'done'."""
+    if not isinstance(result, dict):
+        return "malformed result"
+    task_status = result.get("task_status")
+    if isinstance(task_status, str):
+        return task_status
+    if result.get("stop_reason") in ("stopped", "cancelled"):
+        return "stopped"
+    if result.get("status") in ("pending", "running"):
+        return "started"
+    if result.get("error"):
+        return "failed"
+    return "malformed result"
+
+
+def _delegate_summary_text(result: dict) -> str:
+    """A bounded human-readable line from the child's own completion."""
+    final = result.get("final_message")
+    if isinstance(final, str) and final.strip():
+        return " ".join(final.split())[:500]
+    output = result.get("output")
+    if isinstance(output, str) and output.strip():
+        return " ".join(output.split())[:500]
+    if isinstance(output, dict):
+        for key in ("summary", "text", "message"):
+            value = output.get(key)
+            if isinstance(value, str) and value.strip():
+                return " ".join(value.split())[:500]
+    return ""
+
+
+def _delegate_child_view(result: dict) -> dict:
+    """Bounded structured projection of one child result for the step card."""
+    environment = result.get("environment")
+    limitations = result.get("limitations")
+    artifacts = result.get("artifacts")
+    view: dict = {
+        "name": result.get("name"),
+        "child_id": result.get("child_id"),
+        "frame_id": result.get("frame_id"),
+        "task_status": result.get("task_status"),
+        "stop_reason": result.get("stop_reason"),
+        "status": result.get("status"),
+        "turns": result.get("turns"),
+        "max_turns": result.get("max_turns"),
+        "environment": environment if isinstance(environment, dict) else None,
+        "summary": _delegate_summary_text(result),
+        "limitations": (
+            [str(item)[:300] for item in limitations[:8] if str(item).strip()]
+            if isinstance(limitations, list)
+            else []
+        ),
+        "artifacts": (
+            [str(item)[:200] for item in artifacts[:50]]
+            if isinstance(artifacts, list)
+            else []
+        ),
+    }
+    if result.get("error"):
+        view["error"] = str(result["error"])[:600]
+    missing = result.get("missing_artifacts")
+    if isinstance(missing, list) and missing:
+        view["missing_artifacts"] = [str(item)[:200] for item in missing[:50]]
+    return view
+
+
+def _delegate_step_projection(result: Any, ok: bool) -> tuple[dict, str, str]:
+    """(output, summary, status) for a delegate step card.
+
+    Replaces the old flattening (``{"result": _short(result, 2000)}``, "done"):
+    the summary word reflects the envelope's ``task_status`` — never a
+    hardcoded "done" — the default body is the structured projection, and the
+    bounded raw string sits behind it for the details reveal. Fan-out lists
+    project every child and the worst child's status wins. The generic
+    ``_declared_failure_reason`` contract stays untouched for everyone else.
+    """
+    if not ok:
+        err = result.get("error") if isinstance(result, dict) else None
+        reason = " ".join(str(err).split()) if err else ""
+        summary = "failed" if not reason else f"failed: {reason[:160]}"
+        return ({"error": str(err)[:600] if err else "failed"}, summary, "error")
+    if isinstance(result, list):
+        children = [
+            (
+                _delegate_child_view(item)
+                if isinstance(item, dict)
+                else {"summary": str(_short(item, 200))}
+            )
+            for item in result[:48]
+        ]
+        worst = "done"
+        counts: dict[str, int] = {}
+        for item in result:
+            status = _delegate_result_status(item)
+            if _DELEGATE_STEP_SEVERITY[status] > _DELEGATE_STEP_SEVERITY[worst]:
+                worst = status
+            word = _delegate_result_word(item)
+            counts[word] = counts.get(word, 0) + 1
+        breakdown = ", ".join(f"{n} {word}" for word, n in counts.items())
+        summary = (
+            f"{len(result)} children: {breakdown}"[:200] if result else "0 children"
+        )
+        return ({"children": children, "raw": _short(result, 2000)}, summary, worst)
+    if isinstance(result, dict):
+        view = _delegate_child_view(result)
+        view["raw"] = _short(result, 2000)
+        return (view, _delegate_result_word(result), _delegate_result_status(result))
+    return ({"raw": _short(result, 2000)}, "malformed result", "error")
+
+
 def _step_end(method: str, kind: str, result: Any, ok: bool) -> tuple[dict, str]:
     """(output, one-line summary) for a finished step."""
-    if not ok or (isinstance(result, dict) and result.get("error")):
+    if kind == "delegate":
+        # Before the generic declared-failure read: a max_turns envelope
+        # carries a top-level ``error`` beside its structured fields, and the
+        # card must keep the structure rather than collapse to the error.
+        output, summary, _status = _delegate_step_projection(result, ok)
+        return (output, summary)
+    err = _declared_failure_reason(result)
+    if not ok or err is not None:
         # Carry the reason onto the card. This used to collapse every failure
         # to the bare word "failed", so a save_artifact that raised
         # "no such file: bar_chart.png" showed the user (and the reopened
         # Timeline) nothing to act on.
-        err = result.get("error") if isinstance(result, dict) else None
         reason = " ".join(str(err).split()) if err else ""
         summary = "failed" if not reason else f"failed: {reason[:160]}"
         return ({"error": str(err)[:600] if err else "failed"}, summary)
@@ -598,6 +912,15 @@ def _step_end(method: str, kind: str, result: Any, ok: bool) -> tuple[dict, str]
                 {"name": r.get("name"), "version_id": r.get("version_id")},
                 "rolled back",
             )
+        if method == "skills_read":
+            # A reference read returns bytes, not a Skill record: the generic
+            # "loaded" tail below would report an empty name and description
+            # for it and read as a SKILL.md load that never happened.
+            text = result if isinstance(result, str) else ""
+            return (
+                {"content": text[:24000], "chars": len(text)},
+                _plural(len(text), "char") + " read",
+            )
         return (
             {
                 "name": r.get("name"),
@@ -653,7 +976,7 @@ def _step_end(method: str, kind: str, result: Any, ok: bool) -> tuple[dict, str]
             {"filename": r.get("filename"), "version_id": r.get("version_id")},
             "saved",
         )
-    if kind in ("delegate", "mcp"):
+    if kind == "mcp":
         return ({"result": _short(result, 2000)}, "done")
     if kind == "fold":
         n_plddt = len((r.get("plddt_csv") or "").splitlines())
@@ -715,19 +1038,36 @@ class HostDispatcher:
             workspace=lambda: self.workspace_path,
         )
         # Late-bound on purpose: the CLI assigns frame_id after construction,
-        # and a mid-cell submit must probe the workspace *and* the process
-        # cwd — the kernel inherits this process's cwd, and a file the
-        # current cell just wrote exists only on disk until capture runs.
+        # and a mid-cell submit must probe the bound workspace. The process cwd
+        # is deliberately not a second root: on Web runs it is daemon-global,
+        # and treating it as session evidence exposes unrelated files.
         # The store is re-resolved per submit rather than captured: a cached
         # ``self.store`` can be a closed generation (``Store.close()`` evicts
         # the singleton and ``get_store`` mints a new one), whose every query
         # raises and silently degrades reconciliation.
+        #: The current turn's task mode, stamped by the owning loop. ``None``
+        #: (and ``analysis_run``) keep the historical completion contract.
+        self._task_mode: str | None = None
+        # Explicit current-user-turn identity for code evidence. Inferring this
+        # from the latest durable group races concurrent activity and lets a
+        # prior turn's passing Cell be replayed as current evidence.
+        self._task_turn_id: str | None = None
+        self._task_branch_id: str | None = None
         self._completion_service = CompletionService(
             evidence=lambda: gather_submission_evidence(
                 get_store(self.cfg.db_path),
                 self.frame_id,
-                search_roots=(self._files.workspace(), Path.cwd()),
-            )
+                search_roots=(self._files.workspace(),),
+            ),
+            task_mode=lambda: self._task_mode,
+            code_evidence=lambda: gather_code_evidence_context(
+                get_store(self.cfg.db_path),
+                self.frame_id,
+                search_roots=(self._files.workspace(),),
+                file_service=self._files,
+                turn_id=self._task_turn_id,
+                branch_id=self._task_branch_id,
+            ),
         )
         # Lifecycle owners may stamp the supervisor's persistent generation
         # here.  Until then the capability still binds the worker's per-process
@@ -740,12 +1080,19 @@ class HostDispatcher:
         # parallel read-only native tools: each approval must point back to its
         # own provider tool call rather than merely to the surrounding turn.
         self._action_context_local = threading.local()
+        # A Web native writer binds its Artifact committer only for the exact
+        # dispatcher thread executing that action. A foreground Kernel Cell
+        # binds a separate thread-local receipt scope around its one protocol
+        # reader. Background and unrelated delegated workers have no such
+        # scope and therefore cannot leave receipts for a later Cell to drain.
+        self._native_artifact_local = threading.local()
+        self._artifact_receipt_local = threading.local()
         self._bash_authorization = BashAuthorizationService(
             workspace=lambda: self._files.workspace(),
             frame_id=lambda: self.frame_id,
             generation=self._current_bash_generation,
             allowed_roots=_configured_bash_allowed_roots,
-            audit=lambda **fields: self.store.log_host_call(**fields),
+            audit=self._audit_bash_result,
             step_sink=lambda: self.on_step,
         )
         self._data_service = HostDataService(
@@ -753,6 +1100,7 @@ class HostDispatcher:
             config=lambda: self.cfg,
             frame_id=lambda: self.frame_id,
             resolve_path=lambda path, **kwargs: self._resolve(path, **kwargs),
+            restore_artifact=self._restore_artifact_from_foreground,
         )
         # Steering hooks wired by the delegation layer.
         self.steer_fns: dict[str, Callable[..., Any]] = {}
@@ -775,10 +1123,24 @@ class HostDispatcher:
             ),
             fingerprint=lambda *fields: _endpoint_fingerprint(*fields),
         )
-        self._mcp_service = MCPService(self.store, frame_id=lambda: self.frame_id)
+        self._mcp_service = MCPService(
+            self.store,
+            frame_id=lambda: self.frame_id,
+            workspace=lambda: self._files.workspace(),
+        )
         self._doubao_search_service = DoubaoSearchService(self.store)
         self._remote_capability_service = RemoteCapabilityService(
             normalize_probe=lambda spec: _normalize_remote_capability_probe(spec),
+        )
+        from openai4s.host.accelerators import (
+            AcceleratorRoutingService,
+            LocalAcceleratorService,
+        )
+
+        self._local_accelerator_service = LocalAcceleratorService()
+        self._accelerator_routing_service = AcceleratorRoutingService(
+            local_status=self._local_accelerator_service.status,
+            remote_status=self._remote_gpu_status_payload,
         )
         self._remote_science_service = RemoteScienceService(
             provenance_recorder=lambda *args: self._record_remote_prov(*args),
@@ -798,6 +1160,17 @@ class HostDispatcher:
         # Runtime adapter for independent background kernels. Gateway/CLI set
         # this dynamically so jobs inherit the foreground workspace and env.
         self.background_kernel_factory: Callable[[], Any] | None = None
+        # Optional execution-lifetime admission supplied by the Web session.
+        # Kept as a dynamic hook so an already-created BackgroundExecutor sees
+        # the current session coordinator rather than capturing stale state.
+        self._artifact_writer_coordinator = _HeadlessArtifactWriterCoordinator()
+        self._artifact_restore_backend: Callable[[str, str], dict] | None = None
+        self._artifact_mutation_lease: Callable[[bool], Any] = lambda bound: (
+            self._artifact_writer_coordinator.foreground_mutation(execution_bound=bound)
+        )
+        self.background_execution_lease: Callable[[], Any] | None = (
+            self._artifact_writer_coordinator.background
+        )
         # optional replay recorder: if set, every host_call is taped.
         self.recorder: Any | None = None
         # remote-compute transport, built lazily on first compute_* call.
@@ -838,6 +1211,9 @@ class HostDispatcher:
             get_active_r_env=lambda: self.active_r_env,
             set_active_r_env=lambda value: setattr(self, "active_r_env", value),
             get_on_env_switch=lambda: self.on_env_switch,
+            get_stage10_enabled=lambda: bool(
+                self.cfg.roadmap_features.stage10_scientific_connectors
+            ),
             invoke_control=self._invoke_control_behavior,
             search_web=self._search_web,
         )
@@ -858,6 +1234,10 @@ class HostDispatcher:
             except Exception:  # noqa: BLE001 - fall back to the process cwd
                 workspace = None
             self._compute = ComputeManager(self.cfg, workspace=workspace)
+            from openai4s.compute.stage11 import official_stage11_enabled
+
+            if official_stage11_enabled(self.cfg):
+                self._compute.reconcile()
         return self._compute
 
     @property
@@ -867,7 +1247,10 @@ class HostDispatcher:
 
     @last_output.setter
     def last_output(self, value: dict | None) -> None:
-        self._completion_service.last_output = value
+        if value is None:
+            self._completion_service.clear()
+        else:
+            self._completion_service.last_output = value
 
     @property
     def skill_loader(self) -> Any:
@@ -943,6 +1326,89 @@ class HostDispatcher:
         value = getattr(self._action_context_local, "value", None)
         return dict(value) if isinstance(value, dict) else {}
 
+    @contextmanager
+    def bind_native_artifact_committer(
+        self,
+        commit: Callable[[tuple[dict[str, Any], ...]], list[dict[str, Any]]],
+    ) -> Iterator[None]:
+        """Bind the Web batch capture callback for one native writing action."""
+
+        marker = object()
+        previous = getattr(self._native_artifact_local, "commit", marker)
+        self._native_artifact_local.commit = commit
+        try:
+            yield
+        finally:
+            if previous is marker:
+                try:
+                    del self._native_artifact_local.commit
+                except AttributeError:
+                    pass
+            else:
+                self._native_artifact_local.commit = previous
+
+    @contextmanager
+    def bind_artifact_receipt_scope(self) -> Iterator[list[dict[str, Any]]]:
+        """Collect receipts for exactly one foreground Cell/action thread."""
+
+        marker = object()
+        previous = getattr(self._artifact_receipt_local, "receipts", marker)
+        receipts: list[dict[str, Any]] = []
+        self._artifact_receipt_local.receipts = receipts
+        try:
+            yield receipts
+        finally:
+            if previous is marker:
+                try:
+                    del self._artifact_receipt_local.receipts
+                except AttributeError:
+                    pass
+            else:
+                self._artifact_receipt_local.receipts = previous
+
+    def _artifact_capture_bound(self) -> bool:
+        return callable(getattr(self._native_artifact_local, "commit", None)) or (
+            isinstance(getattr(self._artifact_receipt_local, "receipts", None), list)
+        )
+
+    def _artifact_scope_required(self, method: str) -> bool:
+        if method == "science_search":
+            return bool(
+                self.control_tool_execution_metadata("science_search").get(
+                    "writes_files"
+                )
+            )
+        if method == "compute_result":
+            return bool(self.cfg.roadmap_features.stage11_durable_remote_compute)
+        return False
+
+    def _commit_or_queue_artifact_receipt(self, result: Any) -> Any:
+        if not isinstance(result, dict):
+            return result
+        single = result.pop("_openai4s_artifact_capture", None)
+        multiple = result.pop("_openai4s_artifact_captures", None)
+        receipts: list[dict[str, Any]] = []
+        if isinstance(single, dict):
+            receipts.append(dict(single))
+        if isinstance(multiple, list):
+            receipts.extend(dict(item) for item in multiple if isinstance(item, dict))
+        if not receipts:
+            return result
+        commit = getattr(self._native_artifact_local, "commit", None)
+        if callable(commit):
+            committed = commit(tuple(receipts))
+            if isinstance(single, dict) and committed:
+                # Preserve Stage 10's existing public response contract.
+                result["artifact"] = committed[0]
+        else:
+            scoped = getattr(self._artifact_receipt_local, "receipts", None)
+            if not isinstance(scoped, list):
+                raise RuntimeError(
+                    "Artifact-producing Host call requires a foreground capture scope"
+                )
+            scoped.extend(receipts)
+        return result
+
     def _canonical_mcp_server(self, method: str, args: list) -> list:
         """Rewrite an MCP ``server`` argument to the connector's own id.
 
@@ -983,10 +1449,96 @@ class HostDispatcher:
         """Bind host-side file operations to the kernel's actual cwd."""
         self.workspace_path = Path(path).resolve()
 
+    def set_task_mode(self, mode: str | None) -> None:
+        """Bind the current turn's BINDING task mode for the completion contract.
+
+        Plain string on purpose: the vocabulary is owned by
+        ``openai4s.agent.task_modes`` and the *requirement* by
+        ``openai4s.host.code_evidence``; the Host layer only carries the value
+        so ``CompletionService`` can read which turn it is validating. Owning
+        loops stamp a mode here only when it was selected EXPLICITLY (CLI
+        ``--mode``, the Web ``task_mode`` body field); a mode detected from
+        request text stays advisory — prompt guidance only — and stamps
+        ``None``, so a classifier false positive can never make required
+        evidence out of a turn nobody asked to be strict about.
+        """
+        self._task_mode = str(mode) if mode else None
+        # Every owning loop calls this at the start of a user turn. Clear the
+        # old scope before the new ledger exists so an omitted caller binding
+        # fails closed instead of silently reusing the previous turn.
+        self._task_turn_id = None
+        self._task_branch_id = None
+
+    def set_task_evidence_scope(
+        self, *, turn_id: str | None, branch_id: str | None = None
+    ) -> None:
+        """Bind code evidence to the current durable user turn and branch."""
+
+        self._task_turn_id = str(turn_id) if turn_id else None
+        self._task_branch_id = (
+            str(branch_id or self.frame_id or "") if turn_id else None
+        )
+
+    def _audit_bash_result(self, **fields: Any) -> None:
+        """Persist a shell receipt under the Cell's canonical action group."""
+
+        context = self._current_action_context()
+        fields.setdefault("action_group_id", context.get("action_group_id"))
+        fields.setdefault("action_id", context.get("action_id"))
+        self.store.log_host_call(**fields)
+
+    def verify_code_evidence(self, payload: Mapping[str, Any]) -> str | None:
+        """The code-mode completion check, shared by both completion doors.
+
+        ``host.submit_output`` reaches it inside ``CompletionService.submit``;
+        the Engine's ``finalize_response`` reaches it here, bound by the
+        executor. One implementation, so a mode's requirements cannot hold on
+        one door and be absent on the other.
+        """
+        return self._completion_service.verify_code_claims(dict(payload))
+
+    def revalidate_pending_completion(self) -> str | None:
+        """Recheck a mid-cell completion against post-capture file bytes."""
+
+        return self._completion_service.revalidate_pending_completion()
+
     def set_session_domain(self, domain: Any | None) -> None:
         """Attach the Web runtime's shared filesystem-aware session service."""
 
         self._session_service.set_domain(domain)
+
+    def set_artifact_restorer(
+        self,
+        restore: Callable[[str, str], dict] | None,
+        *,
+        mutation_lease: Callable[[bool], Any] | None = None,
+        materialise: Callable[..., dict] | None = None,
+        writer: Callable[[], Any] | None = None,
+    ) -> None:
+        """Bind Web Host restore to the session's canonical exact writer."""
+
+        self._artifact_restore_backend = restore
+        self._data_service.set_artifact_restorer(
+            self._restore_artifact_from_foreground,
+            materialise=materialise,
+            writer=writer,
+        )
+        if mutation_lease is not None:
+            self._artifact_mutation_lease = mutation_lease
+
+    def _restore_artifact_from_foreground(
+        self, artifact_id: str, version_id: str
+    ) -> dict:
+        """Refuse background/unbound restores before their first side effect."""
+
+        execution_bound = bool(self._current_action_context()) or (
+            self._artifact_capture_bound()
+        )
+        with self._artifact_mutation_lease(execution_bound):
+            backend = self._artifact_restore_backend
+            if backend is not None:
+                return backend(artifact_id, version_id)
+            return self._data_service.restore_artifact_exact(artifact_id, version_id)
 
     def set_child_execution_policy(self, policy: ChildExecutionPolicy | None) -> None:
         """Bind one additional fail-closed policy for a delegated child."""
@@ -1048,6 +1600,31 @@ class HostDispatcher:
             )
             self._session_tool_scope = identity
         return self._session_tool_catalog
+
+    def control_tool_execution_metadata(self, name: str) -> dict[str, Any]:
+        """Resolve flag-dependent execution declarations in one place."""
+
+        tool = self.tool_catalog().get(name)
+        if tool is None:
+            return {}
+        return {
+            "writes_files": bool(tool.writes_files_for(self._tool_context)),
+            "read_only": bool(tool.read_only_for(self._tool_context)),
+            "side_effect_class": str(tool.side_effect_class_for(self._tool_context)),
+        }
+
+    def control_tool_policy(self, name: str, arguments: Any) -> tuple[str, list[str]]:
+        """Return exact audit policy for the current feature configuration."""
+
+        tool = self.tool_catalog().get(name)
+        if tool is None:
+            return "unknown", [f"tool:{name or '<unnamed>'}"]
+        metadata = self.control_tool_execution_metadata(name)
+        try:
+            resources = list(tool.resource_keys(arguments or {}))
+        except Exception:  # noqa: BLE001 - audit metadata stays total
+            resources = [f"tool:{name}"]
+        return str(metadata.get("side_effect_class") or "unknown"), resources
 
     def set_capability_scope(self, frame_id: str | None = None) -> None:
         """Retarget Skill/Specialist policy to the frame's project + session."""
@@ -1154,7 +1731,12 @@ class HostDispatcher:
         except Exception:  # noqa: BLE001 - audit metadata stays total
             audit_resources = [f"host:{method}"]
         audit_side_effect = (
-            control_tool.side_effect_class
+            str(
+                self.control_tool_execution_metadata(control_tool.name).get(
+                    "side_effect_class"
+                )
+                or control_tool.side_effect_class
+            )
             if control_tool is not None
             else "runtime_mutation"
         )
@@ -1217,6 +1799,21 @@ class HostDispatcher:
                     }
                     ok = False
                     return result
+            if (
+                self._artifact_scope_required(method)
+                and not self._artifact_capture_bound()
+            ):
+                # The provider/search call writes into the workspace. Without
+                # an exact native-action or foreground-Cell capture scope,
+                # allowing it to proceed would either lose provenance or let
+                # a later unrelated Cell claim the receipt. Background workers
+                # are intentionally refused before the side effect.
+                result = {
+                    "error": "Artifact-producing Host call requires a foreground "
+                    "capture scope"
+                }
+                ok = False
+                return result
             # opencode-style permission gate: block on user approval for
             # risk-bearing tools. Covers this dispatcher (foreground + background
             # cells) and, via the process-wide broker keyed by root_frame_id,
@@ -1238,7 +1835,12 @@ class HostDispatcher:
                     else None
                 )
             )
-            if secret_target is not None and _is_secret_path(secret_target):
+            secret_check_target = (
+                _secret_pre_gate_path(secret_target, self._files)
+                if secret_target is not None
+                else None
+            )
+            if secret_check_target is not None and _is_secret_path(secret_check_target):
                 result = {
                     "error": "Permission denied: access to secret files "
                     f"(e.g. .env / keys) is blocked: {secret_target}"
@@ -1250,7 +1852,30 @@ class HostDispatcher:
                 target = _gate_target(permission_method, args)
                 from openai4s.permissions import broker
 
-                gate = broker().gate(
+                permission_broker = broker()
+                reviewer_for = getattr(
+                    permission_broker, "approvals_reviewer_for", None
+                )
+                try:
+                    approvals_reviewer = (
+                        reviewer_for(store=self.store, frame_id=self.frame_id)
+                        if callable(reviewer_for)
+                        else None
+                    )
+                except Exception:  # noqa: BLE001 - unreadable selection is not consent
+                    approvals_reviewer = "user"
+                (
+                    resolved_file_path,
+                    resolved_file_is_credential,
+                ) = _guardian_file_review(
+                    permission_method,
+                    args,
+                    self._files,
+                    self.cfg,
+                    approvals_reviewer,
+                )
+
+                gate = permission_broker.gate(
                     store=self.store,
                     frame_id=self.frame_id,
                     method=permission_method,
@@ -1262,6 +1887,11 @@ class HostDispatcher:
                     side_effect_class=audit_side_effect,
                     resource_keys=audit_resources,
                     dangerous=audit_dangerous,
+                    canonical_arguments=args,
+                    resolved_file_path=resolved_file_path,
+                    resolved_file_is_credential=resolved_file_is_credential,
+                    guardian_config=self.cfg,
+                    approvals_reviewer=approvals_reviewer,
                 )
                 permission_decision_id = gate.get("decision_id") or gate.get(
                     "continuation_decision_id"
@@ -1272,6 +1902,8 @@ class HostDispatcher:
                     ok = False
                     return result
             result = handler(*args)
+            if method in {"science_search", "compute_result"}:
+                result = self._commit_or_queue_artifact_receipt(result)
             if isinstance(result, dict) and set(result.keys()) == {"error"}:
                 ok = False  # soft-fail contract
             else:
@@ -1314,11 +1946,25 @@ class HostDispatcher:
                     if step_result is None and raised_error is not None:
                         step_result = {"error": raised_error}
                     output, summary = _step_end(method, view[0], step_result, ok)
+                    if view[0] == "delegate":
+                        # Delegate-specific status read at the decision site:
+                        # the envelope's task_status is authoritative, and the
+                        # vocabulary grows "warning" for not-done-not-broken
+                        # (partial/blocked/stopped/max_turns). The generic
+                        # _declared_failure_reason contract is untouched.
+                        step_status = _delegate_step_projection(step_result, ok)[2]
+                    else:
+                        # ``ok`` only tracks the soft-fail envelope; a
+                        # structured result that declares its own failure
+                        # (``ok: False``) must not render as a green "done"
+                        # card either.
+                        step_ok = ok and _declared_failure_reason(step_result) is None
+                        step_status = "done" if step_ok else "error"
                     self.on_step(
                         {
                             "phase": "end",
                             "step_id": step_id,
-                            "status": ("done" if ok else "error"),
+                            "status": step_status,
                             "output": output,
                             "summary": summary,
                         }
@@ -1489,6 +2135,12 @@ class HostDispatcher:
     def _remote_gpu_status_payload(self) -> dict:
         return self._remote_capability_service.status()
 
+    def _accelerator_status_payload(self) -> dict:
+        return self._accelerator_routing_service.status()
+
+    def _m_accelerator_status(self, _spec: dict | None = None) -> dict:
+        return self._accelerator_status_payload()
+
     def _m_remote_gpu_status(self, _spec: dict | None = None) -> dict:
         """Return configured remote GPU hosts and registered services."""
         return self._remote_gpu_status_payload()
@@ -1590,6 +2242,7 @@ class HostDispatcher:
             "app_tiles": True,
             "compute": self._compute_available(),
             "remote_gpu": self._remote_gpu_status_payload(),
+            "accelerators": self._accelerator_status_payload(),
             "r_kernel": self._r_kernel_available(),
             # opencode-parity harness tools
             "bash": True,
@@ -1879,10 +2532,38 @@ class HostDispatcher:
                     "is in neither the compute host registry nor ~/.ssh/config",
                     "not_found",
                 )
+        trusted_version_paths: dict[str, str] = {}
+        inputs = kw.get("inputs") or []
+        if isinstance(inputs, (str, dict)):
+            inputs = [inputs]
+        for item in inputs:
+            if not isinstance(item, dict):
+                continue
+            version_id = str(item.get("version_id") or "").strip()
+            if version_id and version_id not in trusted_version_paths:
+                trusted_version_paths[version_id] = (
+                    self._data_service.artifact_snapshot_path(version_id)
+                )
+        if trusted_version_paths:
+            return self.compute.submit(
+                kw,
+                trusted_version_paths=trusted_version_paths,
+            )
         return self.compute.submit(kw)
 
     def _m_compute_result(self, kw: dict) -> Any:
-        return self._compute_guard(lambda: self.compute.result(kw))
+        result = self._compute_guard(lambda: self.compute.result(kw))
+        if not self.cfg.roadmap_features.stage11_durable_remote_compute:
+            return result
+        if not isinstance(result, dict) or set(result) == {"error"}:
+            return result
+        from openai4s.compute.stage11 import harvest_artifact_receipts
+
+        receipts = harvest_artifact_receipts(result, workspace=self._workspace())
+        if receipts:
+            result = dict(result)
+            result["_openai4s_artifact_captures"] = receipts
+        return result
 
     def _m_compute_cancel(self, kw: dict) -> Any:
         return self._compute_guard(lambda: self.compute.cancel(kw))
@@ -2082,6 +2763,15 @@ class HostDispatcher:
     def _new_background_kernel(self) -> Any:
         if self.background_kernel_factory is not None:
             return self.background_kernel_factory()
+        if self.cfg.team_mode:
+            # A team Cell needs the embedding to provide an OS read boundary
+            # scoped to its durable session owner.  The generic dispatcher
+            # cannot derive that ownership safely, so its historical bare
+            # Kernel fallback must not turn a first-turn native
+            # ``exec_background`` into an unsandboxed cross-session read path.
+            raise RuntimeError(
+                "team exec_background requires a session-scoped kernel factory"
+            )
         from openai4s.kernel import Kernel
 
         # ``background_kernel_factory`` is wired when a *foreground* kernel
@@ -2108,6 +2798,11 @@ class HostDispatcher:
             self._bg_executor = BackgroundExecutor(
                 kernel_factory=self._new_background_kernel,
                 dispatcher=self,
+                lifetime_factory=lambda: (
+                    self.background_execution_lease()
+                    if self.background_execution_lease is not None
+                    else nullcontext()
+                ),
             )
         return self._bg_executor
 

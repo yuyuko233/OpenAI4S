@@ -75,8 +75,10 @@ def _call(handler, method, path, *, body=None, query=None):
     handler._query = lambda: query or {}
     handler._body = lambda: body or {}
     handler._json = lambda value, code=200: replies.append((code, value))
-    handler._send = lambda code, data, content_type, extra=None: replies.append(
-        (code, data, content_type, extra or {})
+    handler._send = (
+        lambda code, data, content_type, extra=None, security=None: replies.append(
+            (code, data, content_type, extra or {})
+        )
     )
     handler._api(method, path)
     assert replies
@@ -554,6 +556,7 @@ def test_restart_permission_route_requires_explicit_continuation(tmp_path):
         tool="mcp_call",
         target="lab/send",
         payload=payload,
+        canonical_arguments=[{"server": "lab", "tool": "send"}],
     )
     runner.close()
     runner.store.close()
@@ -606,6 +609,36 @@ def test_restart_permission_route_requires_explicit_continuation(tmp_path):
     finally:
         restarted.close()
         restarted.store.close()
+
+
+@pytest.mark.parametrize("invalid_allow", ["false", 0, 1, [], {}, None])
+def test_permission_decision_route_requires_a_json_boolean(tmp_path, invalid_allow):
+    runner, handler, frame_id = _setup(tmp_path)
+    decision_id = f"permission-invalid-{type(invalid_allow).__name__}"
+    runner.store.create_permission_request(
+        decision_id=decision_id,
+        root_frame_id=frame_id,
+        frame_id=frame_id,
+        project_id="project-domain",
+        tool="mcp_call",
+        target="lab/send",
+        payload={"type": "await_permission", "frame_id": frame_id},
+        canonical_arguments=[{"server": "lab", "tool": "send"}],
+    )
+    try:
+        code, response = _call(
+            handler,
+            "POST",
+            f"/frames/{frame_id}/decision",
+            body={"decision_id": decision_id, "allow": invalid_allow},
+        )
+
+        assert code == 400
+        assert response["ok"] is False
+        assert response["code"] == "invalid_allow"
+        assert runner.store.get_permission_request(decision_id)["state"] == "pending"
+    finally:
+        runner.close()
 
 
 def test_variable_inspector_route_never_starts_workers_and_is_idle_only(tmp_path):

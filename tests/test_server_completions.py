@@ -53,6 +53,26 @@ def test_completion_message_projects_summary_bullets_and_real_artifacts():
     assert "](/api/artifacts/a-2)" in text
 
 
+def test_trusted_completion_links_exact_encoded_versions_and_skips_mutable_heads():
+    text = completion_message(
+        {"output": {"summary": "Delivered verified bytes."}},
+        [
+            {
+                "artifact_id": "mutable-head",
+                "latest_version_id": "version/报告 1?#",
+                "filename": "报告 [final].csv",
+            },
+            {"artifact_id": "head-without-version", "filename": "unstable.csv"},
+        ],
+        trusted_delivery=True,
+    )
+
+    assert "/api/v1/artifacts/versions/version%2F%E6%8A%A5%E5%91%8A%201%3F%23" in text
+    assert "mutable-head" not in text
+    assert "unstable.csv" not in text
+    assert "报告 \\[final\\].csv" in text
+
+
 def test_completion_message_deduplicates_existing_closing_prose():
     text = completion_message(
         {
@@ -135,6 +155,16 @@ def test_code_only_success_has_honest_running_and_actual_output_status():
     )
 
 
+def test_agent_prompt_documents_the_delegation_task_status_contract():
+    """D5 parent-side guidance: the prompt tells the parent to read the
+    machine-readable task_status instead of parsing child prose — additive
+    fragment, the pinned literals around it survive verbatim."""
+    assert "`task_status` (completed | partial | blocked | failed)" in SYSTEM_PROMPT
+    assert "parse the child's prose" in SYSTEM_PROMPT
+    assert "anything other than `completed`" in SYSTEM_PROMPT
+    assert 'task_status="partial"' in SYSTEM_PROMPT
+
+
 def test_agent_prompt_never_claims_post_fence_prose_runs_after_submit():
     assert "After it succeeds you may add" not in SYSTEM_PROMPT
     assert "Only prose BEFORE the action fence is user-visible" in SYSTEM_PROMPT
@@ -144,11 +174,20 @@ def test_agent_prompt_never_claims_post_fence_prose_runs_after_submit():
     assert "exact name present in the current tool declarations" in SYSTEM_PROMPT
     assert "must never replace an ordinary foreground Cell" in SYSTEM_PROMPT
     assert "exact native `list_skills`" in SYSTEM_PROMPT
+    assert "zero-argument overview returns the exact total count" in SYSTEM_PROMPT
+    assert "`collection` id and `offset=0`" in SYSTEM_PROMPT
+    assert "returned `next_offset`" in SYSTEM_PROMPT
     assert "`list_dir` lists workspace files only" in SYSTEM_PROMPT
     assert "`host.skills.list()` only inside" in SYSTEM_PROMPT
     assert "1-4 completed" in SYSTEM_PROMPT
     assert "complete repair cell" in SYSTEM_PROMPT
     assert "only the tail" in SYSTEM_PROMPT
+    assert "probes local hardware first" in SYSTEM_PROMPT
+    assert "ask whether they already have it locally" in SYSTEM_PROMPT
+    assert "download weights while that question is unanswered" in SYSTEM_PROMPT
+    assert "A staged model asset is not admitted" in SYSTEM_PROMPT
+    assert "terminal record succeeds" in SYSTEM_PROMPT
+    assert "Missing code or weights is a bring-up condition" in SYSTEM_PROMPT
     assert all(
         key in SYSTEM_PROMPT
         for key in ("summary", "findings", "metrics", "limitations")
@@ -160,6 +199,8 @@ def test_gateway_prompt_keeps_native_cells_and_host_rpcs_distinct():
     assert "`host.*` syntax is Python source" in _GATEWAY_PROMPT_EXTRA
     assert "a foreground Cell has no runner function" in _GATEWAY_PROMPT_EXTRA
     assert "exact native `list_skills`" in _GATEWAY_PROMPT_EXTRA
+    assert "overview gives the exact total, curated names" in _GATEWAY_PROMPT_EXTRA
+    assert "returned `next_offset`" in _GATEWAY_PROMPT_EXTRA
     assert "Only inside a fenced Python Cell use `host.skills.list()`" in (
         _GATEWAY_PROMPT_EXTRA
     )

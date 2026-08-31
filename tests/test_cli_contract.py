@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import json
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -148,6 +151,7 @@ def test_setup_only_accepts_each_documented_environment(name):
         (["init", "--help"], "--api-key-stdin"),
         (["setup", "--help"], "--only"),
         (["setup", "--help"], "--dry-run"),
+        (["benchmark", "--help"], "--acceptance"),
         (["jupyter", "describe", "--help"], "--json"),
         (["jupyter", "export", "--help"], "--language"),
         (["jupyter", "install", "--help"], "--prefix"),
@@ -172,7 +176,7 @@ def test_root_help_lists_every_supported_subcommand_through_python_m():
     assert proc.returncode == 0, proc.stderr
     assert (
         "{serve,status,doctor,verify-package,diagnostics,stop,url,run,init,setup,"
-        "benchmark,env,jupyter,share,relay}" in proc.stdout
+        "benchmark,env,jupyter,share,cluster,user,relay}" in proc.stdout
     )
     for command in (
         "serve",
@@ -198,9 +202,24 @@ def test_root_help_lists_every_supported_subcommand_through_python_m():
         "setup",
         "jupyter",
         "share",
+        # Team-mode accounts are managed on the server, daemon or not; an
+        # admin who cannot find `user` in --help cannot bootstrap login.
+        "user",
+        # Batch jobs: the surface a researcher reaches for when the work is
+        # too long to sit in front of.
+        "cluster",
         "relay",
     ):
         assert command in proc.stdout
+
+
+def test_root_version_prints_the_declared_package_version(capsys):
+    from openai4s import __version__
+
+    with pytest.raises(SystemExit) as stopped:
+        _cli_module().main(["--version"])
+    assert stopped.value.code == 0
+    assert capsys.readouterr().out.strip() == f"openai4s {__version__}"
 
 
 def test_cli_rejects_unknown_commands_and_missing_run_task(capsys):
@@ -229,6 +248,273 @@ def test_url_command_is_offline_and_returns_success(monkeypatch, capsys):
 
     assert module.main(["url"]) == 0
     assert capsys.readouterr().out.strip() == "http://127.0.0.1:9876/"
+
+
+def _recorded_daemon_config(tmp_path, *, host="172.25.100.5", port=9876, pid=4321):
+    config = SimpleNamespace(
+        host="127.0.0.1",
+        port=8760,
+        data_dir=tmp_path,
+        pidfile=tmp_path / "openai4s.pid",
+        statefile=tmp_path / "daemon.json",
+    )
+    config.pidfile.write_text(str(pid), encoding="utf-8")
+    config.statefile.write_text(
+        json.dumps(
+            {
+                "pid": pid,
+                "pid_start": "daemon-start",
+                "host": host,
+                "port": port,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config
+
+
+@pytest.mark.parametrize(
+    ("recorded_host", "url_host"),
+    [
+        ("172.25.100.5", "172.25.100.5"),
+        ("0.0.0.0", "localhost"),
+        ("", "localhost"),
+        ("::", "localhost"),
+        ("::1", "[::1]"),
+    ],
+)
+def test_url_uses_the_live_recorded_endpoint_without_losing_url_semantics(
+    tmp_path, monkeypatch, capsys, recorded_host, url_host
+):
+    from openai4s.server import local_auth
+
+    module = _cli_module()
+    config = _recorded_daemon_config(tmp_path, host=recorded_host)
+    token = local_auth.load_or_mint(tmp_path)
+
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    monkeypatch.setattr(module, "_daemon_alive", lambda _cfg, _pid: True)
+    monkeypatch.setattr(module, "_process_start_token", lambda _pid: "daemon-start")
+
+    assert module.cmd_url(SimpleNamespace()) == 0
+    assert capsys.readouterr().out.strip() == (f"http://{url_host}:9876/?token={token}")
+
+
+def test_url_ignores_a_recorded_endpoint_when_the_pid_is_not_live(
+    tmp_path, monkeypatch, capsys
+):
+    module = _cli_module()
+    config = _recorded_daemon_config(tmp_path)
+
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    monkeypatch.setattr(module, "_daemon_alive", lambda _cfg, _pid: False)
+
+    assert module.cmd_url(SimpleNamespace()) == 0
+    assert capsys.readouterr().out.strip() == "http://127.0.0.1:8760/"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            {"pid": 4322, "host": "172.25.100.5", "port": 9876},
+            id="stale-pid",
+        ),
+        pytest.param(
+            {
+                "pid": 4321,
+                "pid_start": "stale-start",
+                "host": "172.25.100.5",
+                "port": 9876,
+            },
+            id="reused-pid",
+        ),
+        pytest.param(
+            {
+                "pid": 4321,
+                "pid_start": None,
+                "host": "172.25.100.5",
+                "port": 9876,
+            },
+            id="missing-start-token",
+        ),
+        pytest.param(
+            {"pid": True, "host": "172.25.100.5", "port": 9876}, id="bool-pid"
+        ),
+        pytest.param({"pid": 4321, "host": None, "port": 9876}, id="host-type"),
+        pytest.param({"pid": 4321, "host": "bad host", "port": 9876}, id="host-space"),
+        pytest.param(
+            {"pid": 4321, "host": "http://remote", "port": 9876},
+            id="host-url",
+        ),
+        pytest.param({"pid": 4321, "host": "[::1]", "port": 9876}, id="host-brackets"),
+        pytest.param(
+            {"pid": 4321, "host": "127.0.0.1", "port": "9876"},
+            id="port-type",
+        ),
+        pytest.param({"pid": 4321, "host": "127.0.0.1", "port": True}, id="bool-port"),
+        pytest.param({"pid": 4321, "host": "127.0.0.1", "port": 0}, id="port-zero"),
+        pytest.param({"pid": 4321, "host": "127.0.0.1", "port": 65536}, id="port-high"),
+        pytest.param("not-json", id="malformed-json"),
+    ],
+)
+def test_recorded_endpoint_rejects_stale_or_invalid_state(
+    tmp_path, monkeypatch, payload
+):
+    module = _cli_module()
+    config = SimpleNamespace(statefile=tmp_path / "daemon.json")
+    if isinstance(payload, str):
+        content = payload
+    else:
+        content = json.dumps({"pid_start": "daemon-start", **payload})
+    config.statefile.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(module, "_process_start_token", lambda _pid: "daemon-start")
+
+    assert module._recorded_endpoint(config, 4321) is None
+
+
+def test_stage1_run_allows_control_only_agent_before_any_readiness_probe(
+    tmp_path, monkeypatch, capsys
+):
+    from openai4s import agent as agent_module
+    from openai4s.config import Config, LLMConfig, RoadmapFeatureFlags
+
+    module = _cli_module()
+    cfg = Config(
+        data_dir=tmp_path,
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+        roadmap_features=RoadmapFeatureFlags(stage1_trusted_delivery=True),
+    )
+    calls: list[tuple[str, object]] = []
+
+    class Agent:
+        def __init__(self, *, cfg, verbose, task_mode=None):
+            calls.append(("construct", (cfg, verbose, task_mode)))
+
+        def run(self, task):
+            calls.append(("run", task))
+            return {
+                "stop_reason": "submitted",
+                "submitted_output": {
+                    "output": {"summary": "control-only completion"},
+                    "completion_bullets": ["Answered without a science runtime"],
+                },
+                "final_message": "control-only completion",
+            }
+
+    def forbidden_readiness(**_kwargs):
+        raise AssertionError("cmd_run probed readiness before action routing")
+
+    monkeypatch.setattr(module, "get_config", lambda: cfg)
+    monkeypatch.setattr(agent_module, "Agent", Agent)
+    monkeypatch.setattr(
+        "openai4s.kernel.readiness.standard_profile_readiness",
+        forbidden_readiness,
+    )
+
+    status = module.cmd_run(
+        SimpleNamespace(task="analyze data", json=True, verbose=False)
+    )
+
+    assert status == 0
+    assert calls == [
+        ("construct", (cfg, False, None)),
+        ("run", "analyze data"),
+    ]
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload["stop_reason"] == "submitted"
+    assert payload["final_message"] == "control-only completion"
+
+
+def test_stage1_run_projects_typed_first_cell_readiness_refusal(
+    tmp_path, monkeypatch, capsys
+):
+    from openai4s import agent as agent_module
+    from openai4s.config import Config, LLMConfig, RoadmapFeatureFlags
+    from openai4s.kernel.readiness import EnvironmentReadinessError
+
+    module = _cli_module()
+    cfg = Config(
+        data_dir=tmp_path,
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+        roadmap_features=RoadmapFeatureFlags(stage1_trusted_delivery=True),
+    )
+    readiness = {
+        "state": "needs_repair",
+        "ready": False,
+        "missing_packages": {"python": ["numpy"], "r": ["r-base"]},
+        "missing_environments": [],
+        "remediation": {
+            "plan_argv": ["openai4s", "env", "plan", "python", "r", "--repair"],
+            "apply_argv": ["openai4s", "env", "apply", "python", "r", "--repair"],
+        },
+    }
+
+    class Agent:
+        def __init__(self, *, cfg, verbose, task_mode=None):
+            del cfg, verbose, task_mode
+
+        def run(self, task):
+            del task
+            raise EnvironmentReadinessError(readiness)
+
+    monkeypatch.setattr(module, "get_config", lambda: cfg)
+    monkeypatch.setattr(agent_module, "Agent", Agent)
+
+    status = module.cmd_run(
+        SimpleNamespace(task="run a Cell", json=True, verbose=False)
+    )
+
+    assert status == 2
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload["code"] == "environment_not_ready"
+    assert payload["standard_profile_readiness"] == readiness
+    assert "python: numpy" in payload["error"]
+    assert "openai4s env apply python r --repair" in payload["error"]
+
+
+def test_flag_off_run_preserves_agent_execution_without_readiness_probe(
+    tmp_path, monkeypatch, capsys
+):
+    from openai4s import agent as agent_module
+    from openai4s.config import Config, LLMConfig
+
+    module = _cli_module()
+    cfg = Config(
+        data_dir=tmp_path,
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+    )
+    calls: list[tuple[str, object]] = []
+
+    class Agent:
+        def __init__(self, *, cfg, verbose, task_mode=None):
+            calls.append(("construct", (cfg, verbose, task_mode)))
+
+        def run(self, task):
+            calls.append(("run", task))
+            return {
+                "stop_reason": "submitted",
+                "submitted_output": None,
+                "final_message": "done",
+            }
+
+    def forbidden_readiness(**_kwargs):
+        raise AssertionError("flag-off CLI performed the Stage 1 readiness probe")
+
+    monkeypatch.setattr(module, "get_config", lambda: cfg)
+    monkeypatch.setattr(agent_module, "Agent", Agent)
+    monkeypatch.setattr(
+        "openai4s.kernel.readiness.standard_profile_readiness",
+        forbidden_readiness,
+    )
+
+    status = module.cmd_run(
+        SimpleNamespace(task="legacy task", json=False, verbose=True)
+    )
+
+    assert status == 0
+    assert calls == [("construct", (cfg, True, None)), ("run", "legacy task")]
+    assert "final: done" in capsys.readouterr().out
 
 
 def test_daemon_health_ignores_environment_proxies_for_a_wsl_nat_host(monkeypatch):
@@ -524,3 +810,96 @@ def test_status_reports_the_local_data_dir_without_trusting_health(monkeypatch, 
     assert "model    : demo" in output
     assert "data_dir : /trusted/local-data" in output
     assert "/leaked" not in output
+
+
+def test_status_probes_and_reports_the_live_recorded_endpoint(
+    tmp_path, monkeypatch, capsys
+):
+    module = _cli_module()
+    config = _recorded_daemon_config(tmp_path, host="172.25.100.5", port=9123)
+    opened = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def read():
+            return b'{"status":"ok","model":"demo"}'
+
+    def open_daemon(request, *, timeout):
+        opened.append((request, timeout))
+        return Response()
+
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    monkeypatch.setattr(module, "_daemon_alive", lambda _cfg, _pid: True)
+    monkeypatch.setattr(module, "_process_start_token", lambda _pid: "daemon-start")
+    monkeypatch.setattr(module, "_open_daemon", open_daemon)
+
+    assert module.cmd_status(SimpleNamespace()) == 0
+    assert opened == [("http://172.25.100.5:9123/health", 3)]
+    output = capsys.readouterr().out
+    assert "at http://172.25.100.5:9123/" in output
+    assert "127.0.0.1:8760" not in output
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGINT dispositions are POSIX")
+def test_ctrl_c_during_a_run_stops_this_agent_s_cell_and_still_exits():
+    """Both halves of what a terminal Ctrl-C used to do, restored.
+
+    The kernel worker now runs in its own session, so a group-wide SIGINT no
+    longer reaches it. That is the point -- a stray Ctrl-C must not end every
+    cell a daemon is running -- and it takes something real away from the CLI,
+    where `Agent.run` executes cells on this very thread: before, the signal
+    reached both this process (whose default handler raised KeyboardInterrupt
+    out of the run) and the worker (whose handler ended the cell). Restoring
+    one half without the other would be a behaviour change arriving through a
+    signal handler.
+    """
+
+    cli = _cli_module()
+    calls = []
+    agent = SimpleNamespace(
+        interrupt_foreground=lambda: (calls.append("interrupt"), True)[1]
+    )
+
+    before = signal.getsignal(signal.SIGINT)
+    with cli._foreground_cell_interrupt(agent):
+        handler = signal.getsignal(signal.SIGINT)
+        assert handler is not before, "no handler was installed"
+        with pytest.raises(KeyboardInterrupt):
+            handler(signal.SIGINT, None)
+
+    assert calls == ["interrupt"], "the running cell was not interrupted"
+    assert signal.getsignal(signal.SIGINT) is before, "the disposition leaked"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGINT dispositions are POSIX")
+@pytest.mark.parametrize(
+    "interrupt_foreground",
+    [
+        pytest.param(lambda: False, id="nothing_to_interrupt"),
+        pytest.param(
+            lambda: (_ for _ in ()).throw(RuntimeError("worker gone")),
+            id="interrupt_raises",
+        ),
+    ],
+)
+def test_ctrl_c_exits_even_when_the_cell_cannot_be_interrupted(interrupt_foreground):
+    """The exit is unconditional. A run that survived Ctrl-C because no worker
+    happened to be up, or because interrupting one raised, would be a new
+    behaviour nobody asked for -- and the user's second Ctrl-C would be their
+    only way out."""
+
+    cli = _cli_module()
+    agent = SimpleNamespace(interrupt_foreground=interrupt_foreground)
+
+    before = signal.getsignal(signal.SIGINT)
+    with cli._foreground_cell_interrupt(agent):
+        handler = signal.getsignal(signal.SIGINT)
+        with pytest.raises(KeyboardInterrupt):
+            handler(signal.SIGINT, None)
+    assert signal.getsignal(signal.SIGINT) is before

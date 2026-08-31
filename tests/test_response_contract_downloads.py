@@ -63,6 +63,7 @@ DOWNLOADS: dict[str, set[str]] = {
     },
     r"/frames/([^/]+)/session/export": {"application/vnd.openai4s.session+zip"},
     r"/artifacts/(.+)": {"application/octet-stream"},
+    r"/artifacts/versions/([^/]+)": {"application/octet-stream"},
 }
 
 
@@ -91,8 +92,10 @@ class _Client:
         payload = json.dumps(body or {}).encode("utf-8") if body is not None else b""
         handler = object.__new__(self._handler)
         sent: dict = {}
-        handler._send = lambda code, data, ctype, extra=None: sent.update(
-            code=code, body=data, ctype=ctype
+        handler._send = (
+            lambda code, data, ctype, extra=None, security=None: sent.update(
+                code=code, body=data, ctype=ctype
+            )
         )
         handler.command = method
         handler.path = f"/api/v1{path}"
@@ -272,6 +275,16 @@ SUCCESS_REQUIRED: dict[str, tuple[int, frozenset[str]]] = {
         frozenset({"state", "generations", "current"}),
     ),
     "GET /frames/([^/]+)/recovery/actions": (200, frozenset({"actions"})),
+    "GET /frames/([^/]+)/auto-mode": (
+        200,
+        frozenset(
+            {"schema_version", "feature_enabled", "writable", "selection", "run"}
+        ),
+    ),
+    "GET /frames/([^/]+)/auto-audits": (
+        200,
+        frozenset({"schema_version", "audits", "has_more"}),
+    ),
     "GET /frames/([^/]+)/branches": (200, frozenset({"branches"})),
     "POST /frames/([^/]+)/branches/fork": (
         200,
@@ -429,3 +442,36 @@ def test_the_frozen_schemas_declare_every_seeded_success(driven):
     assert problems == {}, (
         "the committed response schemas do not describe these successes: " f"{problems}"
     )
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("PUT", "/connectors/directory"),
+        ("PATCH", "/connectors/directory"),
+        ("PUT", "/connectors/no-such-connector"),
+        ("PATCH", "/connectors/no-such-connector"),
+    ],
+)
+def test_a_connector_write_verb_keeps_the_frozen_not_found_shape(server, method, path):
+    """`/connectors/directory` is a sibling route, not a connector id.
+
+    `([^/]+)` matches it too, so adding PUT/PATCH for connector rows captured
+    a path that used to fall through to the router's own not-found -- and
+    answered it with a body missing `method` and `path`. Both spellings reach
+    a 404 here, and both have to keep the shape clients already had, which is
+    the one every other not-found on this surface emits.
+    """
+    frozen = json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "docs" / "response-schemas.json"
+        ).read_text(encoding="utf-8")
+    )["routes"]
+    _runner, client = server
+
+    status, body = client.request(method, path, {})
+
+    assert status == 404, body
+    key = f"{method} {path.replace('no-such-connector', '([^/]+)')} [error]"
+    assert set(frozen[key]["schema"]["required"]) <= set(body), sorted(body)

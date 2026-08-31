@@ -123,27 +123,54 @@ def missing_core() -> list[tuple[str, str]]:
     return [(pip, imp) for pip, imp in CORE_PACKAGES if not _importable(imp)]
 
 
+def _has_pip() -> bool:
+    """Whether this interpreter can run ``python -m pip`` at all.
+
+    uv-managed virtualenvs (including the daemon's own `.venv` built by
+    `setup.sh`) ship without a `pip` module by default, so "run pip" is a
+    choice to probe, not an assumption.
+    """
+    try:
+        return _importutil.find_spec("pip") is not None
+    except Exception:  # noqa: BLE001 - a broken finder reads as "no pip"
+        return False
+
+
 def _pip_install(
     pip_names: list[str], *, upgrade: bool = False, timeout: int = 1800
 ) -> tuple[bool, str]:
     if not pip_names:
         return True, ""
-    cmd = [
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "--break-system-packages",
-        "--disable-pip-version-check",
-        "--no-input",
-    ]
+    if _has_pip():
+        cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--break-system-packages",
+            "--disable-pip-version-check",
+            "--no-input",
+        ]
+    else:
+        # No pip module: fall back to a `uv` binary on PATH, pointed at this
+        # same interpreter. Only tool *selection* falls back — a failed install
+        # under a present pip is reported as-is rather than retried with uv,
+        # which would blur what actually broke.
+        uv = shutil.which("uv")
+        if uv is None:
+            return False, (
+                f"{sys.executable} has no pip module and no `uv` binary was "
+                "found on PATH. Install pip into this environment "
+                "(python -m ensurepip --upgrade), or install uv, then retry."
+            )
+        cmd = [uv, "pip", "install", "--python", sys.executable]
     if upgrade:
         cmd.append("--upgrade")
     cmd += pip_names
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return False, f"pip install timed out after {timeout}s"
+        return False, f"package install timed out after {timeout}s"
     except Exception as e:  # noqa: BLE001
         return False, str(e)
     log = (proc.stdout or "") + (proc.stderr or "")
@@ -477,7 +504,20 @@ def run_confined_probe(
     # the try leaked the just-created workspace on every probe on such a host.
     try:
         argv, env, sandbox = _confined_probe(base_argv, workspace)
-        return subprocess.run(argv, capture_output=True, timeout=timeout, env=env)
+        # `start_new_session` for the same reason `PipeTransport` sets it:
+        # `KernelSandbox.wrap_command` no longer emits bubblewrap's
+        # `--new-session`, so the session boundary has to come from the spawn.
+        # A foreign interpreter runs its own `.pth` files and `sitecustomize`
+        # before the probe code, and `stdin` here is the daemon's, so without
+        # this it would hold the operator's controlling terminal.
+        return subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+            start_new_session=True,
+        )
     finally:
         if sandbox is not None:
             try:

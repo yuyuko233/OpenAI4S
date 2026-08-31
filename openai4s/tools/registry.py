@@ -70,6 +70,7 @@ from openai4s.tools.mcp import (
     ListMCPToolsTool,
     ReadMCPResourceTool,
 )
+from openai4s.tools.model_assets import StageModelAssetTool
 from openai4s.tools.network_access import RequestNetworkAccessTool
 from openai4s.tools.progress import (
     ReadPlanTool,
@@ -80,6 +81,7 @@ from openai4s.tools.progress import (
 )
 from openai4s.tools.read_text_file import ReadTextFileTool
 from openai4s.tools.remote_capabilities import (
+    AcceleratorStatusTool,
     RegisterRemoteCapabilityTool,
     RemoteGPUStatusTool,
 )
@@ -102,6 +104,7 @@ from openai4s.tools.session import (
 from openai4s.tools.skills import (
     ListSkillsTool,
     LoadSkillTool,
+    ReadSkillFileTool,
     RollbackSkillVersionTool,
     SearchSkillsTool,
     SkillHistoryTool,
@@ -136,6 +139,7 @@ TOOL_TYPES: tuple[type[Tool], ...] = (
     ListSkillsTool,
     SearchSkillsTool,
     LoadSkillTool,
+    ReadSkillFileTool,
     SkillStatusTool,
     SkillHistoryTool,
     RollbackSkillVersionTool,
@@ -176,6 +180,8 @@ TOOL_TYPES: tuple[type[Tool], ...] = (
     GetMCPPromptTool,
     CallMCPTool,
     RequestNetworkAccessTool,
+    StageModelAssetTool,
+    AcceleratorStatusTool,
     RemoteGPUStatusTool,
     RegisterRemoteCapabilityTool,
     SubmitRemoteComputeJobTool,

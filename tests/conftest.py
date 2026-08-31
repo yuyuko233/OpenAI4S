@@ -24,8 +24,24 @@ os.environ["OPENAI4S_SKIP_DOTENV"] = "1"
 _LLM_ENV_LEAK = re.compile(
     r"^OPENAI4S_(?:LLM_[A-Z0-9_]+|[A-Z0-9_]*(?:BASE_URL|MODEL|API_KEY))$"
 )
+_ROADMAP_ENV_LEAK = (
+    "OPENAI4S_STAGE1_TRUSTED_DELIVERY",
+    "OPENAI4S_STAGE2_AUTO_RUN_STORAGE",
+    "OPENAI4S_STAGE3_SCIENTIFIC_REVIEW_SHADOW",
+    "OPENAI4S_STAGE4_REVIEW_COMPLETION_GATE",
+    "OPENAI4S_STAGE5_AUTO_REPAIR",
+    "OPENAI4S_STAGE6_GUARDIAN_SHADOW",
+    "OPENAI4S_STAGE7_GUARDIAN_ENFORCEMENT",
+    "OPENAI4S_STAGE8_LIVE_NOTEBOOK_LINEAGE",
+    "OPENAI4S_STAGE9_ARTIFACT_WORKBENCH",
+    "OPENAI4S_STAGE10_SCIENTIFIC_CONNECTORS",
+    "OPENAI4S_STAGE11_DURABLE_REMOTE_COMPUTE",
+    "OPENAI4S_STAGE12_AUTO_MODE_GA",
+)
 for _name in [n for n in os.environ if _LLM_ENV_LEAK.match(n)]:
     del os.environ[_name]
+for _name in _ROADMAP_ENV_LEAK:
+    os.environ.pop(_name, None)
 
 # The non-LLM definition-time defaults leak the same way and are frozen at the
 # same moment: ``Config``'s field defaults read these at class definition, so
@@ -40,6 +56,25 @@ for _name in (
     "OPENAI4S_CONTEXT_WINDOW",
     "OPENAI4S_COMPACTION_TRIGGER_RATIO",
     "OPENAI4S_RECORD_TAPE",
+    # Team-server posture. `Config` reads both on *every* construction
+    # (`_env_flag("OPENAI4S_TEAM_MODE")`, `_data_roots()`), and
+    # docs/team-server.md tells operators to export them — so the developer
+    # most likely to have them set is the one running this suite. Measured
+    # rather than assumed: a green subset produced 11 failures in
+    # tests/test_gateway.py under OPENAI4S_TEAM_MODE=1 (token gate,
+    # DNS-rebind, WS upgrade, error envelopes), and OPENAI4S_DATA_ROOTS
+    # turned test_team_files.py's unconfigured-roots shape from 404 into
+    # 200. Neither is matched by the `_LLM_ENV_LEAK` regex above, which
+    # wants a MODEL/BASE_URL/API_KEY suffix — `MODE` is not `MODEL`.
+    "OPENAI4S_TEAM_MODE",
+    "OPENAI4S_DATA_ROOTS",
+    "OPENAI4S_TRUSTED_PROXY_ORIGINS",
+    # The worker listener, for the same reason: an exported value would
+    # start a real socket in tests that assert the feature is off.
+    "OPENAI4S_WORKER_LISTEN",
+    "OPENAI4S_WORKER_CONNECT",
+    "OPENAI4S_WORKER_ADVERTISE",
+    "OPENAI4S_RECONCILE_INTERVAL",
 ):
     os.environ.pop(_name, None)
 
@@ -51,12 +86,24 @@ os.environ["OPENAI4S_LLM_API_KEY"] = "test-key"
 os.environ["OPENAI4S_UNATTENDED_APPROVAL"] = "deny"
 os.environ["OPENAI4S_NOTEBOOK_REPL"] = "0"
 os.environ["OPENAI4S_ALLOW_PRIVATE_FETCH"] = "0"
+os.environ["OPENAI4S_ALLOW_FAKE_IP_DNS"] = "0"
 # Keep the suite out of the developer's real login keychain, for the same
 # reason ~/.openai4s is redirected below. Left on `auto`, every Store that
 # touched a credential would write to it — and the broker's resolution
 # self-test would round-trip through it on top. Tests that mean to exercise a
 # keychain backend construct it explicitly.
 os.environ["OPENAI4S_SECRET_STORE"] = "plaintext"
+# The Volcengine bridge resolves `arkcli` from PATH when no path is configured,
+# and the response-contract sweep drives the /volcengine/* routes against the
+# real service. On a machine that installed the CLI (the startup guide's own
+# advice), the "offline" suite would spawn real arkcli subprocesses — including
+# `auth login --no-browser`, a live SSO round trip — and a schema capture would
+# freeze that machine's account state into docs/response-schemas.json. Pinning
+# the configured path to a nonexistent sentinel makes executable() resolve to
+# "" everywhere, so every test and capture records the deterministic
+# "not installed" projection. Tests that exercise the bridge inject their own
+# executable or runner explicitly.
+os.environ["OPENAI4S_ARKCLI_PATH"] = "/nonexistent/openai4s-offline-arkcli"
 # Nothing in the offline suite may reach the real telemetry endpoint, for the
 # same reason the share relay is cleared below — and this one is not
 # hypothetical. A benchmark case granted consent to itself, sealed a payload
@@ -105,6 +152,13 @@ def isolated_openai4s_home(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI4S_SKIP_DOTENV", "1")
     for name in [n for n in os.environ if _LLM_ENV_LEAK.match(n)]:
         monkeypatch.delenv(name, raising=False)
+    # Rollout flags are also configuration inputs. A developer exercising an
+    # opt-in stage locally must not silently change the default response-shape
+    # capture or activate later-stage behavior in the offline suite. Tests
+    # that cover a stage set an explicit Config or set the variable after this
+    # fixture has established the off baseline.
+    for name in _ROADMAP_ENV_LEAK:
+        monkeypatch.delenv(name, raising=False)
     # The provider-native last-resort keys (ANTHROPIC_API_KEY, OPENAI_API_KEY,
     # ...) feed the same resolver: a developer's real export would make a
     # keyless-config test see a configured provider.
@@ -123,6 +177,8 @@ def isolated_openai4s_home(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI4S_ALLOW_PRIVATE_FETCH", "0")
     # Never the developer's real keychain — see the module-level default.
     monkeypatch.setenv("OPENAI4S_SECRET_STORE", "plaintext")
+    # Never the developer's real Ark CLI — see the module-level default.
+    monkeypatch.setenv("OPENAI4S_ARKCLI_PATH", "/nonexistent/openai4s-offline-arkcli")
     # Re-applied per test: a test that overrode the endpoint for its own reasons
     # must not leave the next one pointed at the real host. See the module-level
     # default for why this is set at all.
@@ -204,11 +260,52 @@ def _pause_capture_for_stubbed_backends(request):
         recorder.paused = previous
 
 
-def pytest_unconfigure(config):
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session, exitstatus):
+    config = session.config
     captured = getattr(config, "_openai4s_recorder", None)
     if not captured:
         return
     recorder, destination = captured
     from openai4s.server import response_capture
 
+    # Split runs. Publish inside sessionfinish, before xdist's hookwrapper sends
+    # `workerfinished`; pytest_unconfigure is too late, because a write failure
+    # there occurs after the controller has already accepted exit status 0.
+    worker_input = getattr(config, "workerinput", {})
+    worker = worker_input.get("workerid")
+    if worker:
+        try:
+            response_capture.save_partial(
+                recorder,
+                destination,
+                worker,
+                worker_count=worker_input.get("workercount"),
+                run_id=worker_input.get("testrunuid"),
+            )
+        except Exception as error:
+            # Xdist snapshots the original exit status before yielding to this
+            # hook and otherwise reports success even when share publication
+            # raises. Mutate the worker output it is about to send as well as
+            # the local session; assembly's expected-count check remains the
+            # independent backstop if the worker disappears entirely.
+            message = (
+                f"response capture share for {worker} could not be published: "
+                f"{type(error).__name__}: {error}"
+            )
+            session.shouldfail = message
+            session.exitstatus = pytest.ExitCode.INTERNAL_ERROR
+            worker_output = getattr(config, "workeroutput", None)
+            if isinstance(worker_output, dict):
+                worker_output["shouldfail"] = message
+                worker_output["exitstatus"] = int(pytest.ExitCode.INTERNAL_ERROR)
+            raise
+        return
+    # The controller of a split run executes no tests, so its recorder is
+    # empty. Writing it would put an empty capture where the merge is about to
+    # put the real one -- harmless today because `assemble` overwrites it, and
+    # a fabricated "the suite reached no route" the moment anything reads the
+    # file before the merge.
+    if getattr(config.option, "numprocesses", None):
+        return
     response_capture.save(recorder.document(), destination)

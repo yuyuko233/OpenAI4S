@@ -10,7 +10,9 @@ integration tests at the bottom run only when an Rscript is resolvable.
 """
 
 import os
+import signal
 import stat
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -191,6 +193,48 @@ def test_interrupt_returns_interrupted_result_and_keeps_worker(fake_rscript, tmp
         k.shutdown()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signal dispositions")
+def test_interrupt_reaches_r_even_when_the_spawning_process_ignores_sigint(
+    fake_rscript, tmp_path
+):
+    """A backgrounded daemon (`./start.sh &`, nohup) runs with SIGINT set to
+    SIG_IGN; SIG_IGN survives the sh wrapper's exec, and R — exactly like the
+    CPython running this fake — installs its interrupt handler only when the
+    inherited disposition is not SIG_IGN. Before the spawn-boundary reset in
+    kernel/transport.py the worker was therefore born uninterruptible:
+    Kernel.interrupt()'s SIGINT was discarded in the child and the cell ran to
+    completion while the caller reported a delivered stop. The fake reproduces
+    that faithfully (revert the reset and this test fails by sleeping out the
+    full 30s), so the regression stays covered on machines without R.
+
+    The interrupt is armed by the cell's first drained chunk, not a delay —
+    the same pattern as the real-R interrupt tests — so the signal cannot land
+    before the fake has entered its interruptible sleep.
+    """
+    old = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        k = spawn_r_kernel(cwd=str(tmp_path), rscript=fake_rscript)
+        try:
+            fired = threading.Event()
+
+            def interrupt_once_streaming(_text: str) -> None:
+                if not fired.is_set():
+                    fired.set()
+                    k.interrupt()
+
+            r = k.execute("SLEEP", on_chunk=interrupt_once_streaming)
+            assert fired.is_set(), "the cell finished without streaming a chunk"
+            assert r["interrupted"] is True, r
+            assert r["error"] == "Interrupted"
+            # and the worker survived, as the interrupt contract promises
+            assert k.is_alive()
+            assert k.execute("COUNT")["stdout"] == "1"
+        finally:
+            k.shutdown()
+    finally:
+        signal.signal(signal.SIGINT, old)
+
+
 # --- interpreter resolution ---------------------------------------------------
 
 
@@ -244,6 +288,48 @@ def test_spawn_without_any_r_raises(monkeypatch):
 # --- real R integration (skipped when no R is installed) ----------------------
 
 _REAL_R = resolve_r_interpreter()
+
+
+@pytest.mark.skipif(_REAL_R is None, reason="no Rscript resolvable on this machine")
+def test_real_r_file_reads_are_executed_observations_without_global_masks(tmp_path):
+    """The R observer sees calls that ran, never paths merely in source.
+
+    This exercises the observer without the fd-3/fd-4 transport because some
+    macOS R builds refuse to reopen a pipe through ``/dev/fd``.  The ordinary
+    real-worker tests below cover that transport independently.
+    """
+
+    source_literal = str(_R_WORKER).replace("\\", "\\\\").replace('"', '\\"')
+    tmp_literal = str(tmp_path).replace("\\", "\\\\").replace('"', '\\"')
+    script = f"""
+source_lines <- readLines("{source_literal}", warn = FALSE)
+cut <- grep("# --- one cell", source_lines, fixed = TRUE)[1] - 1L
+setwd("{tmp_literal}")
+eval(parse(text = source_lines[seq_len(cut)]), envir = .GlobalEnv)
+.oai4s_lineage$install()
+dir.create("nested")
+writeLines(c("value", "7"), "nested/live.csv")
+writeLines(c("value", "99"), "dead.csv")
+.oai4s_lineage$begin()
+if (FALSE) read.csv("dead.csv")
+table_value <- utils::read.csv(file.path("nested", "live.csv"))
+write.csv(table_value, "write-only.csv", row.names = FALSE)
+observed <- .oai4s_lineage$finish()
+cat(paste(observed, collapse = "|"), "\\n", sep = "")
+cat(table_value$value[[1]], "\\n", sep = "")
+cat(exists("read.csv", envir = .GlobalEnv, inherits = FALSE), "\\n", sep = "")
+"""
+    completed = subprocess.run(
+        [_REAL_R, "--vanilla", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["nested/live.csv", "7", "FALSE"]
+    assert (tmp_path / "write-only.csv").is_file()
 
 
 @pytest.mark.skipif(_REAL_R is None, reason="no Rscript resolvable on this machine")
@@ -544,3 +630,46 @@ def test_real_r_error_lineno_survives_streaming(tmp_path):
         assert result["trace"]["error_lineno"] == 3
     finally:
         kernel.shutdown()
+
+
+@pytest.mark.skipif(_REAL_R is None, reason="no Rscript resolvable on this machine")
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signal dispositions")
+def test_real_r_interrupt_survives_a_spawning_process_that_ignores_sigint(tmp_path):
+    """The real-R half of the backgrounded-daemon regression.
+
+    SIG_IGN on SIGINT survives exec through sh into Rscript, and R honours an
+    inherited ignore instead of installing its interrupt handler (verified
+    with lldb against the stuck child: sigaction(SIGINT)=SIG_IGN,
+    R_interrupts_pending stayed 0) — so before kernel/transport.py reset the
+    disposition at the spawn boundary, a daemon launched as a shell
+    background job dropped every R interrupt while Python kernels kept
+    working. Spawning under SIG_IGN here proves the reset with the real
+    interpreter; the fake-based sibling covers machines without R.
+    """
+    old = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        kernel = spawn_r_kernel(cwd=str(tmp_path), rscript=_REAL_R)
+        try:
+            fired = threading.Event()
+
+            def interrupt_once_streaming(_text: str) -> None:
+                # One SIGINT, armed by the first drained chunk: the drain keeps
+                # delivering after the first, and a conda Rscript can take
+                # seconds to start — a timed signal lands in that window.
+                if not fired.is_set():
+                    fired.set()
+                    kernel.interrupt()
+
+            result = kernel.execute(
+                "invisible(lapply(1:4000, function(i) cat(strrep('x', 1e6))))",
+                on_chunk=interrupt_once_streaming,
+            )
+            assert fired.is_set(), "the cell finished without streaming a chunk"
+            assert result.get("interrupted") is True, result
+            assert kernel.is_alive()
+            after = kernel.execute("cat('still here\n')")
+            assert after["stdout"] == "still here\n"
+        finally:
+            kernel.shutdown()
+    finally:
+        signal.signal(signal.SIGINT, old)

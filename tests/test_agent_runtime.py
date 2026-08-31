@@ -164,6 +164,46 @@ def test_native_batch_returns_one_canonical_tool_message_per_call(monkeypatch):
     assert outcome.completion is None and outcome.stop_reason is None
 
 
+def test_writing_native_call_uses_delegated_capture_hooks(monkeypatch):
+    events = []
+
+    class Hooks:
+        def before_native(self, call):
+            events.append(("before", call.id))
+            return "snapshot-token"
+
+        def after_native(self, call, token, result):
+            events.append(("after", call.id, token, result))
+
+    monkeypatch.setattr(
+        runtime,
+        "execute_tool_call",
+        lambda dispatcher, call: ("wrote file", True),
+    )
+    executor = LocalActionExecutor(
+        FakeKernel(),
+        FakeDispatcher(),
+        lambda code, messages: None,
+        lambda code: {"stdout": "R", "error": None},
+        cell_hooks=Hooks(),
+    )
+    call = _native_call(
+        0,
+        name="write_file",
+        arguments={"path": "child.txt", "content": "child bytes"},
+    )
+
+    outcome = executor.execute(
+        NativeToolBatch((call,)), ModelReply(), RunState([{"role": "user"}])
+    )
+
+    assert outcome.history_messages[0]["is_error"] is False
+    assert events == [
+        ("before", "call_0"),
+        ("after", "call_0", "snapshot-token", ("wrote file", True)),
+    ]
+
+
 def test_native_parse_error_never_dispatches(monkeypatch):
     def unexpected_dispatch(*args):
         raise AssertionError(f"parse-error call was dispatched: {args!r}")
@@ -256,6 +296,37 @@ def test_code_observation_notes_extra_cells_and_only_submit_sets_completion():
     )
     assert second.completion is submitted
     assert second.stop_reason is None
+
+
+def test_cli_revalidates_mid_cell_completion_after_capture_hooks():
+    class RevalidatingDispatcher(FakeDispatcher):
+        def __init__(self):
+            super().__init__()
+            self.revalidations = 0
+
+        def revalidate_pending_completion(self):
+            self.revalidations += 1
+            if self.last_output is None:
+                return None
+            self.last_output = None
+            return "verified source bytes changed after submission"
+
+    dispatcher = RevalidatingDispatcher()
+    submitted = {"output": {"answer": 42}, "completion_bullets": ["Computed it"]}
+    kernel = FakeKernel(
+        after_execute=lambda: setattr(dispatcher, "last_output", submitted)
+    )
+
+    outcome = _executor(kernel=kernel, dispatcher=dispatcher).execute(
+        CodeCell("python", "host.submit_output(...); mutate_source()"),
+        ModelReply(content="```python\nhost.submit_output(...)\n```"),
+        RunState([]),
+    )
+
+    assert dispatcher.revalidations == 1
+    assert outcome.completion is None
+    assert "rejected after cell capture" in outcome.observation
+    assert "source bytes changed" in outcome.observation
 
 
 def test_code_observation_notes_an_incomplete_tail_after_the_executed_cell():

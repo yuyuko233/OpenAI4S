@@ -91,6 +91,20 @@ def test_int_and_float_observations_widen_to_number():
     assert merge(infer(1), infer(1.5))["type"] == "number"
 
 
+def test_number_subsumes_integer_inside_a_larger_union():
+    """Numeric widening must not depend on how observations are grouped.
+
+    Parallel capture workers merge their local observations before the
+    controller merges the shares.  If ``integer`` survived alongside
+    ``number`` whenever another type was present, grouping ``null`` separately
+    produced a different document from the same observations in one process.
+    """
+    serial = merge(merge(infer(None), infer(1)), infer(1.5))
+    grouped = merge(infer(None), merge(infer(1), infer(1.5)))
+
+    assert serial == grouped == {"type": ["null", "number"]}
+
+
 def test_a_booleans_type_is_not_integer():
     """`bool` is a subclass of `int` in Python, so the naive check types every
     `true` as an integer and a client generated from that expects a number."""
@@ -368,7 +382,7 @@ def _gpu_body(*, present):
         with _patched(gateway_mod, "shutil", _FakeShutil(found=None)):
             return detect()
     completed = subprocess.CompletedProcess(
-        ["nvidia-smi"], 0, "NVIDIA A100, 81920 MiB, 550.54.15\n", ""
+        ["nvidia-smi"], 0, "0, NVIDIA A100, 81920 MiB, 550.54.15\n", ""
     )
     with _patched(gateway_mod, "shutil", _FakeShutil(found="/usr/bin/nvidia-smi")):
         with _patched(gateway_mod, "subprocess", _FakeSubprocess(completed)):
@@ -576,6 +590,66 @@ def test_the_frozen_artifact_exists_and_parses():
     json.loads(ARTIFACT.read_text("utf-8"))
 
 
+def test_standard_profile_readiness_is_a_frozen_response_contract(frozen):
+    """Cell admission depends on this projection, so its keys are guarantees."""
+
+    schema = frozen["routes"]["GET /environments/status [ok]"]["schema"]
+    assert set(schema["required"]) == {
+        "environments",
+        "standard_profile_readiness",
+    }
+
+    readiness = schema["properties"]["standard_profile_readiness"]
+    assert set(readiness["required"]) == {
+        "checked_locally",
+        "enabled",
+        "environments",
+        "missing_environments",
+        "missing_packages",
+        "mutation_performed",
+        "network_contacted",
+        "profile",
+        "ready",
+        "reason",
+        "remediation",
+        "required_environments",
+        "requirements_digest",
+        "schema_version",
+        "state",
+    }
+    properties = readiness["properties"]
+    assert properties["reason"]["type"] == ["null", "string"]
+    assert properties["requirements_digest"]["type"] == ["null", "string"]
+
+    environment = properties["environments"]["items"]
+    assert set(environment["required"]) == {
+        "installed_required_package_count",
+        "issue",
+        "missing_packages",
+        "name",
+        "present",
+        "required_package_count",
+        "state",
+    }
+    assert environment["properties"]["installed_required_package_count"]["type"] == [
+        "integer",
+        "null",
+    ]
+    missing = properties["missing_packages"]["properties"]
+    assert set(missing) == {"python", "r"}
+    assert all(item["items"] == {"type": "string"} for item in missing.values())
+
+    remediation = properties["remediation"]
+    assert remediation["type"] == ["null", "object"]
+    assert set(remediation["required"]) == {
+        "apply_argv",
+        "commands",
+        "kind",
+        "plan_argv",
+        "requires_explicit_action",
+    }
+
+
 def test_the_managed_datapro_routes_are_frozen_from_real_local_responses(frozen):
     """A newly covered route is informational drift to the generic checker.
 
@@ -734,12 +808,12 @@ def test_the_frozen_envelope_never_declares_request_id_nullable(frozen):
 def test_the_envelope_status_is_the_http_status_except_where_a_route_owns_it(frozen):
     """`status` is the integer HTTP status on every error shape but one.
 
-    `POST /frames/<id>/recovery/actions/restart_fresh` answers a failed action
-    with its whole domain result and HTTP 409, and that result carries its own
-    `status` string. The envelope defers rather than destroying it, so this one
-    route legitimately declares both types. Pinned by name: if a second route
-    starts colliding, that is a design question and it should have to be
-    answered, not absorbed.
+    `POST /frames/<id>/recovery/actions/{restore,retry,restart_fresh}` answers a
+    failed action with its whole domain result and HTTP 409, and that result
+    carries its own `status` string. The envelope defers rather than destroying
+    it, so this one route family legitimately declares both types. Pinned by
+    name: if a second route starts colliding, that is a design question and it
+    should have to be answered, not absorbed.
     """
     both = {}
     for route, entry in frozen["routes"].items():
@@ -752,7 +826,7 @@ def test_the_envelope_status_is_the_http_status_except_where_a_route_owns_it(fro
         if declared != "integer":
             both[route] = declared
     assert both == {
-        "POST /frames/[^/]+/recovery/actions/restart_fresh [error]": [
+        "POST /frames/[^/]+/recovery/actions/(?:restore|retry|restart_fresh) [error]": [
             "integer",
             "string",
         ]

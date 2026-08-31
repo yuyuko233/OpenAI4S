@@ -339,12 +339,16 @@ def test_dispatcher_env_list_and_use(tmp_path, monkeypatch):
     switched = {}
     disp.on_env_switch = lambda n: switched.__setitem__("name", n)
 
-    r = disp._m_env_list({"packages": ["biotite", "pandas", "scanpy"]})
+    # The probe package must be one no environment (including the daemon's own
+    # venv, which discovery also surfaces) can ever have installed: scanpy is
+    # no longer safe here because `uv sync --extra singlecell` puts it in the
+    # dev venv.
+    r = disp._m_env_list({"packages": ["biotite", "pandas", "nonexistent-probe-pkg"]})
     assert r["current"] == "struct"
     envs = {e["name"]: e for e in r["environments"]}
     assert "biotite" in envs["struct"]["has"]
     assert "pandas" in envs["python"]["has"]
-    assert r["missing"] == ["scanpy"]  # in no env → truly needs install
+    assert r["missing"] == ["nonexistent-probe-pkg"]  # in no env → needs install
     assert envs["r"]["runnable"] is False
 
     u = disp._m_env_use({"name": "python"})
@@ -358,6 +362,28 @@ def test_dispatcher_env_list_and_use(tmp_path, monkeypatch):
     assert disp.active_r_env == "r"
     assert switched["name"] == "r"  # gateway applies via the pending-env path
     assert "```r" in u_r["note"]
+
+
+def test_env_use_rescans_after_operator_creates_a_conda_environment(
+    tmp_path, monkeypatch
+):
+    roots = tmp_path / "envs"
+    roots.mkdir()
+    monkeypatch.setenv("OPENAI4S_ENV_ROOTS", str(roots))
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(tmp_path / "d"))
+    E.discover_environments(force=True)
+    created = _make_py_env(roots, "reactiont5", packages=("transformers",))
+
+    disp = build_dispatcher()
+    switched = {}
+    disp.on_env_switch = lambda name: switched.__setitem__("name", name)
+
+    result = disp._m_env_use({"name": "reactiont5"})
+
+    assert result["ok"] is True
+    assert result["env"]["name"] == "reactiont5"
+    assert switched == {"name": "reactiont5"}
+    assert E.get_environment("reactiont5").root == created
 
 
 # --- gateway wiring -------------------------------------------------------

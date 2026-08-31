@@ -1,0 +1,118 @@
+# Publish the daemon container image to GitHub Packages (ghcr.io).
+#
+# Two triggers: automatically when a release is published, and manually for an
+# existing tag (the first publication for a release that predates this
+# workflow). Either way `scripts/verify_release_tag.py` refuses a tree whose
+# declared versions do not match the tag — so an image can never carry a tag
+# its own `__version__` disagrees with.
+#
+# What gets *checked out* is `github.sha`, never the tag: a tag is mutable, and
+# this job holds `packages: write` and then runs repository code. The tag is an
+# identity assertion, proved against that SHA before the build and again
+# immediately before the push, the way release.yml's boundaries do. On a manual
+# run that means selecting the tag itself (or a branch whose tip is the tagged
+# commit) as the workflow ref, and passing the same tag as `ref`.
+#
+# The image is not merely built: `scripts/container_smoke.sh` — the same gate
+# PR CI runs — builds it and then proves the daemon actually boots and serves
+# inside it. Only a smoke-passing image is pushed. linux/amd64 only for now:
+# the science stack under QEMU multiplies the build time without a user on the
+# other end; an arm64 slice is a deliberate later addition, not a flag flip.
+#
+# Login uses the job's own GITHUB_TOKEN (packages: write) — no long-lived
+# registry credential exists anywhere in the repository.
+
+name: Publish container image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Release tag to build from, e.g. v0.2.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-image-${{ github.event.release.tag_name || inputs.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/pku-yuangroup/openai4s
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: ghcr
+      url: https://github.com/PKU-YuanGroup/OpenAI4S/pkgs/container/openai4s
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Resolve the release tag
+        id: ref
+        env:
+          REF: ${{ github.event.release.tag_name || inputs.ref }}
+        run: |
+          set -euo pipefail
+          # Anchored, not the `v[0-9]*.[0-9]*.[0-9]*` glob this replaces: that
+          # form also matches `v1.2.3;anything`, and the value is interpolated
+          # into later steps.
+          if ! [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: '$REF' is not a vMAJOR.MINOR.PATCH release tag" >&2
+            exit 1
+          fi
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+          echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
+
+      # `github.sha` rather than the tag: a tag is mutable, and this job holds
+      # `packages: write` and then runs repository code from the checkout. The
+      # tag is an identity assertion, proved against this SHA below.
+      # `persist-credentials: false` keeps that token out of git config while
+      # `container_smoke.sh` builds and runs a container from this tree.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The tag must peel to the immutable workflow SHA
+        env:
+          TAG: ${{ steps.ref.outputs.tag }}
+          SHA: ${{ github.sha }}
+        run: bash scripts/revalidate_release_tag.sh "$TAG" "$SHA"
+
+      - name: Tag matches the tree's declared versions
+        run: python3 scripts/verify_release_tag.py "${{ steps.ref.outputs.tag }}"
+
+      - name: Build the image and smoke it
+        run: |
+          OPENAI4S_SMOKE_IMAGE="$IMAGE:${{ steps.ref.outputs.version }}" \
+            bash scripts/container_smoke.sh
+
+      # The window this closes: minutes to tens of minutes have passed since
+      # the release event, and the push below is the outward-facing act.
+      - name: Revalidate the remote annotated tag before pushing
+        env:
+          TAG: ${{ steps.ref.outputs.tag }}
+          SHA: ${{ github.sha }}
+        run: bash scripts/revalidate_release_tag.sh "$TAG" "$SHA"
+
+      - name: Push the smoke-passing image
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:${{ steps.ref.outputs.version }}"
+          docker tag "$IMAGE:${{ steps.ref.outputs.version }}" "$IMAGE:latest"
+          docker push "$IMAGE:latest"
+
+      - name: Report the published digest
+        run: |
+          docker inspect --format '{{ range .RepoDigests }}{{ . }}{{ "\n" }}{{ end }}' \
+            "$IMAGE:${{ steps.ref.outputs.version }}"

@@ -215,13 +215,14 @@ def test_a_check_with_no_run_id_is_refused(tmp_path):
         _verify(tmp_path, document)
 
 
-def test_the_python_support_matrix_and_browser_matrix_are_both_required():
+def test_python_browser_and_linux_private_pid_checks_are_required():
     """Item 4's binding, asserted on the manifest rather than on prose."""
     names = {gate.check_name for gate in release_gates.CHECK_SUITE_GATES}
     for version in ("3.10", "3.12", "3.13"):
         assert f"Offline tests (py{version})" in names
     for engine in ("chromium", "firefox", "webkit"):
         assert f"Browser workbench E2E ({engine})" in names
+    assert "Linux bubblewrap Python/R persistent interrupt" in names
 
 
 def test_every_required_check_names_a_job_that_really_exists_in_ci():
@@ -692,47 +693,138 @@ def _checkout_refs(job):
     return refs
 
 
-def test_every_release_job_checks_out_the_one_frozen_sha():
-    """Item 1. Five jobs used to resolve `inputs.tag || github.ref` independently.
+def test_every_release_job_checks_out_the_immutable_workflow_sha():
+    """Item 1. No checkout may resolve a dispatch input or step output.
 
     A tag is mutable, so the gates could run on one commit while the wheel came
-    from a second and the DMG from a third, with nothing recording or comparing
-    where any of them came from.
+    from a second and the DMG from a third. ``github.sha`` is fixed when the run
+    is created; the freeze job separately proves it belongs to ``origin/main``.
     """
     workflow = _workflow("release.yml")
     jobs = workflow["jobs"]
-    assert "freeze" in jobs, "no job freezes the source SHA"
-    assert jobs["freeze"]["outputs"]["sha"], "the frozen SHA is not a job output"
-    # The freeze job is the one place allowed to touch the mutable ref.
-    assert any("inputs.tag" in ref for ref in _checkout_refs(jobs["freeze"]))
+    assert "freeze" in jobs, "no job validates the source SHA"
 
     offenders = {}
     for name, job in jobs.items():
-        if name == "freeze":
-            continue
         for ref in _checkout_refs(job):
-            if "needs.freeze.outputs.sha" not in ref:
+            if ref != "${{ github.sha }}":
                 offenders.setdefault(name, []).append(ref)
     assert (
         not offenders
-    ), f"these jobs check out something other than the frozen SHA: {offenders}"
+    ), f"these jobs check out something other than github.sha: {offenders}"
+
+    validation_step = next(
+        step
+        for step in jobs["freeze"].get("steps") or []
+        if step.get("name") == "Validate the workflow SHA and optional release tag"
+    )
+    validation = str(validation_step.get("run") or "")
+    assert 'git merge-base --is-ancestor "$SHA" origin/main' in validation
+    assert '"$TAG_SHA" != "$SHA"' in validation
+    assert "^v[0-9]+\\.[0-9]+\\.[0-9]+$" in validation
+    assert validation_step["env"]["PYPI_ONLY"] == "${{ inputs.pypi_only }}"
+    assert 'if [ "$PUBLISH" = "true" ] || [ "$PYPI_ONLY" = "true" ]; then' in validation
+    assert 'git cat-file -t "$TAG"' in validation
 
 
-def test_every_job_that_checks_out_the_frozen_sha_declares_the_dependency():
-    """A `needs.freeze.outputs.sha` reference in a job that does not `need` freeze
-    resolves to the empty string, which `actions/checkout` reads as the default
-    branch -- a silent, much worse version of the original defect."""
+def test_every_downstream_checkout_waits_for_source_validation():
+    """A trusted ref is not enough unless validation happens before execution."""
     jobs = _workflow("release.yml")["jobs"]
     for name, job in jobs.items():
         if name == "freeze":
             continue
-        if any("needs.freeze" in ref for ref in _checkout_refs(job)):
+        if _checkout_refs(job):
             needs = job.get("needs") or []
             needs = [needs] if isinstance(needs, str) else needs
-            assert "freeze" in needs, (
-                f"{name} uses needs.freeze.outputs.sha without needing freeze, so "
-                f"the ref would resolve to an empty string"
+            assert (
+                "freeze" in needs
+            ), f"{name} executes a checkout without waiting for the freeze job"
+
+
+def test_every_publication_boundary_revalidates_the_remote_annotated_tag():
+    """A tag can move after ``freeze`` while a long platform build is running.
+
+    Each outward-facing boundary must fetch the current remote ref into a fixed
+    local name immediately before it mutates GitHub or PyPI, then prove both the
+    annotated object type and its peeled commit. The frozen checkout alone only
+    proves which source built the artifacts; it says nothing about a later ref
+    rewrite.
+    """
+    jobs = _workflow("release.yml")["jobs"]
+    for job_name in ("attach", "pypi", "finalize"):
+        candidates = [
+            step
+            for step in jobs[job_name].get("steps") or []
+            if str(step.get("name") or "").startswith(
+                "Revalidate the remote annotated tag"
             )
+        ]
+        assert len(candidates) == 1, f"{job_name} has no unique remote-tag check"
+        step = candidates[0]
+        assert step["env"] == {
+            "TAG": "${{ inputs.tag }}",
+            "SHA": "${{ github.sha }}",
+        }
+        # Each boundary *calls* the one implementation. Asserting substrings of
+        # three inline copies made the gate mirror the copy-paste instead of
+        # removing the need for it: three copies can drift apart and still
+        # satisfy four substring checks each.
+        assert (
+            str(step.get("run") or "").strip()
+            == 'bash scripts/revalidate_release_tag.sh "$TAG" "$SHA"'
+        )
+
+    assert jobs["pypi"]["permissions"] == {
+        "contents": "read",
+        "id-token": "write",
+    }, "the PyPI tag revalidation needs read access without widening OIDC"
+
+
+def test_the_tag_revalidation_is_one_implementation_with_teeth():
+    """The checks that used to be inline, asserted once against the script."""
+    script = (ROOT / "scripts" / "revalidate_release_tag.sh").read_text("utf-8")
+
+    assert "set -euo pipefail" in script
+    assert '"refs/tags/${TAG}:${LOCAL_REF}"' in script
+    assert 'git cat-file -t "$LOCAL_REF"' in script
+    assert '"${LOCAL_REF}^{commit}"' in script
+    assert '"$TAG_SHA" != "$SHA"' in script
+    assert script.count("exit 1") == 2, "both refusals must still be refusals"
+
+
+def test_the_container_publication_boundary_is_held_to_the_same_rule():
+    """`publish-image.yml` pushes to ghcr with `packages: write`.
+
+    It is the other publication workflow, and the release-workflow assertions
+    above cannot see it -- which is how it kept a mutable-tag checkout with the
+    token left in git config long after release.yml stopped.
+    """
+    job = _workflow("publish-image.yml")["jobs"]["publish"]
+    steps = job.get("steps") or []
+
+    checkouts = [s for s in steps if "actions/checkout" in str(s.get("uses") or "")]
+    assert checkouts, "no checkout to hold to the rule"
+    for step in checkouts:
+        with_ = step.get("with") or {}
+        assert with_.get("ref") == "${{ github.sha }}"
+        assert with_.get("persist-credentials") is False
+
+    revalidations = [
+        s for s in steps if "revalidate_release_tag.sh" in str(s.get("run") or "")
+    ]
+    assert len(revalidations) == 2, (
+        "the tag must be proved against the frozen SHA before the build and "
+        "again immediately before the outward-facing push"
+    )
+    names = [str(s.get("name") or "") for s in steps]
+    assert names.index("Push the smoke-passing image") > names.index(
+        "Revalidate the remote annotated tag before pushing"
+    )
+
+    resolve = next(s for s in steps if s.get("name") == "Resolve the release tag")
+    # Anchored: the `v[0-9]*.[0-9]*.[0-9]*` glob it replaces also matched
+    # `v1.2.3;anything`, and the value reaches later steps.
+    assert "^v[0-9]+\\.[0-9]+\\.[0-9]+$" in str(resolve.get("run") or "")
 
 
 @pytest.mark.parametrize("workflow", ["ci.yml", "release.yml"])
@@ -747,6 +839,92 @@ def test_every_job_has_an_explicit_timeout(workflow):
         assert (
             isinstance(budget, int) and 0 < budget <= 120
         ), f"{workflow}:{name} has an implausible timeout: {budget}"
+
+
+def test_linux_bwrap_interrupt_smoke_is_an_independent_real_runtime_job():
+    """The private-PID SIGINT proof must not collapse back into fake procfs.
+
+    Raw networking is a deliberate scope choice, so the job proves no egress
+    claim regardless of what the runner could support.
+    Ubuntu's user-namespace restriction is satisfied with its bwrap-specific
+    capability-stripping profile, not by disabling AppArmor for the runner.
+    Everything relevant to worker identity still runs through real bwrap plus
+    real Python and R interpreters on every CI event.
+    """
+
+    jobs = _workflow("ci.yml")["jobs"]
+    job = jobs["linux-bwrap-kernel-interrupt"]
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert "if" not in job, "the security regression must run on pull requests"
+    assert job.get("continue-on-error") is not True
+
+    steps = job["steps"]
+    install = "\n".join(str(step.get("run") or "") for step in steps)
+    for package in (
+        "apparmor",
+        "apparmor-profiles",
+        "bubblewrap",
+        "r-base-core",
+        "r-cran-jsonlite",
+    ):
+        assert package in install
+    assert "--no-install-recommends" in install
+    assert "apparmor_restrict_unprivileged_userns=0" not in install
+    assert "sudo bwrap" not in install
+
+    userns_steps = [
+        step for step in steps if "bwrap-userns-restrict" in str(step.get("run") or "")
+    ]
+    assert len(userns_steps) == 1
+    userns = userns_steps[0]
+    assert "if" not in userns
+    assert userns.get("continue-on-error") is not True
+    assert str(userns.get("run") or "").strip() == (
+        "sudo apparmor_parser --replace "
+        "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"
+    )
+
+    preflight_steps = [
+        step
+        for step in steps
+        if "raise SystemExit((os.getpid(), os.getppid()) != (2, 1))"
+        in str(step.get("run") or "")
+    ]
+    assert len(preflight_steps) == 1
+    preflight = preflight_steps[0]
+    preflight_run = str(preflight.get("run") or "")
+    assert "if" not in preflight
+    assert preflight.get("continue-on-error") is not True
+    assert preflight_run.strip() == (
+        "/usr/bin/bwrap --die-with-parent --new-session --unshare-ipc "
+        "--unshare-uts --unshare-pid --ro-bind / / --dev /dev --proc /proc -- "
+        "/usr/bin/python3 -c 'import os; raise SystemExit((os.getpid(), "
+        "os.getppid()) != (2, 1))'"
+    )
+
+    smoke_steps = [
+        step
+        for step in steps
+        if "harness.smoke.linux_bwrap_interrupt" in str(step.get("run") or "")
+    ]
+    assert len(smoke_steps) == 1
+    smoke = smoke_steps[0]
+    assert "if" not in smoke
+    assert (
+        str(smoke.get("run") or "").strip()
+        == "uv run python -m harness.smoke.linux_bwrap_interrupt"
+    )
+    assert smoke.get("env") == {
+        "OPENAI4S_KERNEL_SANDBOX": "enforce",
+        "OPENAI4S_KERNEL_ALLOW_RAW_NETWORK": "1",
+    }
+    assert smoke.get("continue-on-error") is not True
+    install_steps = [
+        step for step in steps if "r-base-core" in str(step.get("run") or "")
+    ]
+    assert len(install_steps) == 1
+    assert "if" not in install_steps[0]
+    assert install_steps[0].get("continue-on-error") is not True
 
 
 def test_the_release_binds_the_platform_checks_to_the_frozen_sha():
@@ -788,12 +966,12 @@ def test_the_release_binds_the_platform_checks_to_the_frozen_sha():
 def test_the_release_declares_every_platform_it_does_not_prove():
     """A platform leaves the matrix by being declared unprovable, or not at all.
 
-    `linux-sandbox` used to run on `ubuntu-latest`, the one runner where it
-    cannot pass: a hosted runner confines unprivileged user namespaces, so bwrap
-    cannot bring up loopback inside its new netns. ci.yml says exactly that and
-    deliberately has no such job -- but release.yml required it and `build`
-    needs `platform-checks`, so every publication was unreachable. A gate that
-    cannot pass does not block a bad release; it blocks all of them.
+    The former hosted `linux-sandbox` run failed during network-namespace setup.
+    The targeted CI job now loads a restricted bwrap profile, so that historical
+    result does not establish what a full smoke would do today; the raw-network
+    job still cannot prove it. release.yml nevertheless required the unproven
+    leg and `build` needs `platform-checks`, so every publication was
+    unreachable rather than only a bad one being blocked.
 
     The fix must not be a silent deletion. An absent platform and a passing one
     look identical in an evidence bundle, and the plan's rollback clause is that
@@ -830,7 +1008,7 @@ def test_the_release_declares_every_platform_it_does_not_prove():
         module = f"harness.smoke.{name.replace('-', '_')}"
         assert module not in modules, (
             f"{module} is declared unprovable but release.yml still runs it; "
-            "requiring a check that cannot pass makes every release unreachable"
+            "requiring an unproven check makes every release unreachable"
         )
 
 

@@ -33,6 +33,7 @@ const ICONS = {
   "maximize-2": '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" x2="14" y1="3" y2="10"/><line x1="3" x2="10" y1="21" y2="14"/>',
   "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
   "mic": '<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/>',
+  "server": '<rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/>',
   "notebook": '<path d="M2 6h4"/><path d="M2 10h4"/><path d="M2 14h4"/><path d="M2 18h4"/><rect width="16" height="20" x="4" y="2" rx="2"/><path d="M16 2v20"/>',
   "folder": '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
   "compass": '<circle cx="12" cy="12" r="10"/><path d="m16.2 7.8-2.1 6.3-6.3 2.1 2.1-6.3Z"/>',
@@ -124,6 +125,7 @@ const S = { projects: [], sessions: [], project: null, currentId: null, ws: null
   actionTimelineSelectedGroupId: null, actionTimelineSelectedBranchId: null,
   recoveryActions: null, branchState: null, branchUndo: null, contextState: null, securityState: null, computeTasks: null,
   delegationState: null,
+  environmentStatus: null, standardProfileReadiness: null, _environmentStatusPromise: null, _environmentStatusRefreshFailed: false,
   workbenchErrors: {}, _workbenchReq: 0, _timelineHistoryReq: 0, _timelineHistoryLoading: null, _timelineView: null,
   _recoveryActionLoading: null, _branchActionLoading: null, _timelineRestoreFocusGroupId: null,
   variableInspector: { language: "python", results: {}, loading: null, error: "", request: 0 } };
@@ -234,6 +236,7 @@ try {
 } catch {}
 // Re-render the dynamic (JS-built) views currently on screen after a language switch.
 function rerenderI18n() {
+  try { renderEnvironmentReadinessBanner(); } catch {}
   try { if (!$("#dashboard").classList.contains("hidden")) loadDashboard(); } catch {}
   try { renderProjMenu(); } catch {}
   try { renderSessions(); } catch {}
@@ -354,6 +357,23 @@ Object.assign(I18N.zh, {
   "conv.title.default": "会话",
   "conv.title.rename": "重命名会话（回车保存）",
   "cust.compute.desc": "本地内核环境、预装包与加速器",
+  "environment.readiness.bannerTitle": "standard 科研环境尚未就绪",
+  "environment.readiness.bannerMissing": "缺少 {0} 个环境、{1} 个软件包；首个科研 Cell 运行前需要处理。",
+  "environment.readiness.bannerUnavailable": "当前无法确认科研环境是否就绪；未知状态不会被显示成就绪。",
+  "environment.readiness.openCompute": "查看缺项与修复命令",
+  "environment.readiness.cardTitle": "Standard profile readiness",
+  "environment.readiness.ready": "就绪：Python 与 R 的 standard 依赖均已核对。",
+  "environment.readiness.needsSetup": "需要创建缺失的 standard 环境。",
+  "environment.readiness.needsRepair": "环境存在，但缺少 standard 清单中的软件包。",
+  "environment.readiness.unavailable": "无法完成本地 readiness 检查；系统未将它猜测为就绪。",
+  "environment.readiness.missingEnvironments": "缺少环境",
+  "environment.readiness.missingPackages": "{0} 缺少的软件包",
+  "environment.readiness.remediation": "受管修复命令",
+  "environment.readiness.explicitOnly": "仅复制；必须由你显式运行，不会自动安装。",
+  "environment.readiness.copy": "复制命令",
+  "environment.readiness.copied": "修复命令已复制",
+  "environment.readiness.refresh": "刷新 readiness",
+  "environment.readiness.sendBlocked": "首个科研 Cell 已在启动前停止。请先完成 standard 环境配置。",
   "cust.compute.gpuAvailable": "可用",
   "cust.compute.gpuName": "GPU",
   "cust.compute.gpuUnavailable": "不可用（本地无 GPU；重型模型以标注的 CPU 近似替代，或走 Modal/SSH 远程算力）",
@@ -388,6 +408,18 @@ Object.assign(I18N.zh, {
   "cust.compute.preinstalledDetail": "已预装 {0} 个科学/联网包：{1}",
   "cust.compute.title": "计算",
   "cust.connectors.cmdPlaceholder": "启动命令，如 npx -y @modelcontextprotocol/server-filesystem .",
+  "cust.connectors.editTitle": "编辑连接器 — {0}",
+  "cust.connectors.commandLabel": "启动命令（JSON 字符串或字符串数组）",
+  "cust.connectors.argsLabel": "附加参数（JSON 数组）",
+  "cust.connectors.envConfigured": "已配置的环境变量：{0}",
+  "cust.connectors.envNone": "尚未配置环境变量",
+  "cust.connectors.envUpdatesLabel": "新增或替换环境变量",
+  "cust.connectors.envUpdatesPlaceholder": "每行 NAME=value；留空表示保留现有值",
+  "cust.connectors.envRemoveLabel": "删除环境变量",
+  "cust.connectors.envRemovePlaceholder": "每行一个 NAME；只有列出的变量会被删除",
+  "cust.connectors.invalidJson": "命令或参数不是有效的 JSON",
+  "cust.connectors.invalidEnv": "环境变量更新必须使用 NAME=value 格式",
+  "cust.connectors.saved": "已保存连接器 {0}",
   "cust.connectors.customAddName": "添加自定义（命令行 MCP 服务器）",
   "cust.connectors.deleteConfirm": "删除连接器 {0}？",
   "cust.connectors.desc": "MCP 工具服务器：连接外部工具，智能体用 host.mcp.call(id, tool, args) 调用",
@@ -545,6 +577,75 @@ Object.assign(I18N.zh, {
   "cust.models.subtitle": "配置 LLM 兼容协议、Base URL、模型与 API Key（保存后立即生效）",
   "cust.models.subtitle2": "配置多套 LLM API（兼容协议 / Base URL / 模型 / Key），随时新增、切换或删除，方便对接不同接口",
   "cust.models.updateBtn": "更新",
+  "cust.volc.title": "火山方舟",
+  "cust.volc.notInstalled": "Ark Connector 未安装",
+  "cust.volc.getConnector": "获取 Ark Connector",
+  "cust.volc.disconnected": "未连接",
+  "cust.volc.expired": "登录已过期",
+  "cust.volc.connect": "使用火山引擎登录",
+  "cust.volc.loginPrep": "点击登录后会在浏览器打开火山官方授权页。完成授权后，复制页面显示的完整授权字符串（不要只复制其中的 code），再粘贴回这里；OpenAI4S 不会打开系统终端。",
+  "cust.volc.reconnectPrep": "点击重新登录后会在浏览器打开火山官方授权页。完成授权后，复制页面显示的完整授权字符串（不要只复制其中的 code），再粘贴回这里；已有 Project 通常会继续复用。",
+  "cust.volc.connecting": "正在提交授权并检查账号…",
+  "cust.volc.authTitle": "火山授权已准备好",
+  "cust.volc.authBody": "授权页会在浏览器新标签页打开。完成火山账号授权后，复制页面显示的完整授权字符串（通常是一段 Base64 文本，包含 code 和 state），再粘贴回这里；不要只复制其中的 code。如果没有看到新页面，请点击下方按钮重新打开。",
+  "cust.volc.projectHint": "Project 决定 OpenAI4S 可访问的火山资源。已有 Profile 会继续复用；首次登录如果存在多个 Project，Ark CLI 会要求选择一次。",
+  "cust.volc.cancel": "取消",
+  "cust.volc.failed": "连接失败，请重试",
+  "cust.volc.projectRequiredTitle": "账号授权已完成，还差 Project 设置",
+  "cust.volc.projectRequiredBody": "授权已完成，但当前 Ark CLI 还需要 Project 设置。请在本机终端运行 arkcli auth login volc-sso，完成后返回这里重新检查。",
+  "cust.volc.cliSetupTitle": "需要完成一次 Ark CLI 设置",
+  "cust.volc.cliSetupBody": "请在本机终端运行 arkcli auth login volc-sso，完成授权和 Project 设置后再重新检查。",
+  "cust.volc.retrySetup": "重新开始登录",
+  "cust.volc.openAuth": "打开授权页面",
+  "cust.volc.codePlaceholder": "粘贴完整授权码",
+  "cust.volc.complete": "完成授权",
+  "cust.volc.connected": "已连接",
+  "cust.volc.project": "Project：{0}",
+  "cust.volc.connectedNoAccessTitle": "火山账号已连接，但还不能调用模型",
+  "cust.volc.noPlanBody": "当前账号没有 Agent Plan、Coding Plan 或可用的 API Key。可以购买套餐，或创建平台 API Key；创建后 OpenAI4S 会自动检查。",
+  "cust.volc.keyMissingTitle": "账号已连接，套餐尚未准备好",
+  "cust.volc.keyMissingBody": "已找到套餐，但没有可用于模型调用的 API Key。请在火山控制台创建 Key，返回后 OpenAI4S 会自动继续；不需要复制 Key。",
+  "cust.volc.keyWaiting": "正在等待新的 API Key…创建完成后会自动继续。",
+  "cust.volc.keyChoiceTitle": "选择用于 OpenAI4S 的 API Key",
+  "cust.volc.keyChoiceBody": "当前 Profile 中有多把可用 Key，且没有唯一的默认项。选择一次即可，Key 内容不会发送到浏览器。",
+  "cust.volc.apiKey": "API Key",
+  "cust.volc.keyName": "{0}（末四位 {1}）",
+  "cust.volc.profileMissingTitle": "账号已连接，Ark 配置尚未完成",
+  "cust.volc.profileMissingBody": "套餐存在，但 Ark CLI 没有对应的 Profile。重新进行一次登录设置即可补齐。",
+  "cust.volc.planInactiveTitle": "账号已连接，但套餐当前不可用",
+  "cust.volc.planInactiveBody": "检测到套餐，但它尚未生效或已经过期。处理套餐状态后重新检查即可，无需重新登录。",
+  "cust.volc.seatTitle": "账号已连接，还需要团队席位",
+  "cust.volc.seatBody": "检测到团队套餐，但当前用户没有可用席位。请让管理员分配席位后重新检查。",
+  "cust.volc.quotaTitle": "套餐额度已用尽",
+  "cust.volc.quotaBody": "登录和配置仍然有效。额度恢复、续费或切换套餐后重新检查即可，无需重新登录。",
+  "cust.volc.platformTitle": "已找到平台 API Key，还需要模型 Endpoint",
+  "cust.volc.platformBody": "这个账号可以走按量调用，但需要先在方舟控制台选择模型并创建 Endpoint。完成后再返回配置。",
+  "cust.volc.platformReadyTitle": "已找到可用 Endpoint",
+  "cust.volc.platformReadyBody": "OpenAI4S 已找到当前 Project 下唯一可调用的 Endpoint，可以直接完成配置。",
+  "cust.volc.endpointChoiceTitle": "选择用于 OpenAI4S 的 Endpoint",
+  "cust.volc.endpointChoiceBody": "当前 Project 下有多个可调用 Endpoint。选择一个后，OpenAI4S 会将它设为当前模型。",
+  "cust.volc.endpoint": "Endpoint",
+  "cust.volc.useEndpoint": "使用此 Endpoint",
+  "cust.volc.choiceTitle": "选择要用于 OpenAI4S 的套餐",
+  "cust.volc.choiceBody": "这个账号有多个可用套餐。请选择一个，OpenAI4S 只会配置所选套餐。",
+  "cust.volc.checkFailedTitle": "账号已连接，但资源检查未完成",
+  "cust.volc.checkFailedBody": "暂时无法读取套餐或 API Key 状态。可以重新检查；登录状态不会受影响。",
+  "cust.volc.viewPlans": "查看套餐",
+  "cust.volc.createKey": "创建 API Key",
+  "cust.volc.openEndpoints": "打开 Endpoint 控制台",
+  "cust.volc.recheck": "重新检查",
+  "cust.volc.rechecking": "正在检查账号资源…",
+  "cust.volc.rechecked": "检查完成，已同步最新资源",
+  "cust.volc.plan": "套餐",
+  "cust.volc.usePlan": "使用此套餐",
+  "cust.volc.ready": "已可使用",
+  "cust.volc.switch": "切换账号",
+  "cust.volc.disconnect": "从 OpenAI4S 断开",
+  "cust.volc.disconnectConfirm": "从 OpenAI4S 移除此火山配置？Ark CLI 本身仍会保持登录。",
+  "cust.volc.quota": "套餐额度",
+  "cust.volc.reset": "重置：{0}",
+  "cust.volc.configureFailed": "自动配置失败：{0}",
+  "cust.volc.refreshFailed": "刷新失败：{0}",
   "cust.network.allowName": "允许联网",
   "cust.network.desc": "联网访问（智能体的 web_search / web_fetch / bash 与代码请求）",
   "cust.network.disabledDesc": "已禁用 — 智能体仅用本地知识与已有文件",
@@ -568,6 +669,10 @@ Object.assign(I18N.zh, {
   "cust.perm.scope.project": "本项目",
   "cust.perm.title": "权限",
   "cust.perm.toolPlaceholder": "工具（bash / write_file / *）",
+  "cust.skills.collection": "{0} 合集（{1} 个技能）",
+  "cust.skills.collectionDesc": "固定版本、只读的第三方配方，默认收起；展开后可逐个启用或停用。",
+  "cust.skills.collectionHide": "收起",
+  "cust.skills.collectionShow": "展开",
   "cust.skills.deleteConfirm": "删除技能 {0}？",
   "cust.skills.desc": "{0} 个科研技能；开关控制智能体是否可用，也可新建/导入自己的技能",
   "cust.skills.importBtn": "导入 SKILL.md",
@@ -628,6 +733,10 @@ Object.assign(I18N.zh, {
   "editor.label": "编辑 {0}",
   "empty.sub": "描述你的科研任务，智能体会写 Python、联网检索、调用技能并产出图表/报告/结构文件。可试试：",
   "empty.title": "开始一个新分析",
+  "review.badge.candidate": "候选 · 未验证",
+  "review.badge.verified": "已验证",
+  "review.badge.completed_with_issues": "完成 · 未验证",
+  "review.badge.review_unavailable": "审核不可用 · 未验证",
   "export.artifactsHeading": "## 产物",
   "export.messageAssistant": "🤖 助手",
   "export.messageUser": "🧑 用户",
@@ -654,6 +763,20 @@ Object.assign(I18N.zh, {
   "kernel.started": "内核已启动",
   "kernel.stopped": "内核已停止（会话保留，可随时启动以恢复）",
   "ketcher.modalTitle": "Ketcher — 化学结构编辑器",
+  "wb.table.filter": "筛选 col:值",
+  "wb.table.prev": "上一页",
+  "wb.table.next": "下一页",
+  "wb.table.meta": "{0} 行 · 显示 {1}–{2}",
+  "wb.ketcher.edit": "在 Ketcher 中编辑",
+  "wb.locator.title": "按位置评论（进入下一轮）",
+  "wb.locator.pdfPage": "PDF 页码",
+  "wb.locator.pdfPrev": "上一页",
+  "wb.locator.pdfNext": "下一页",
+  "wb.locator.quote": "选中的原文",
+  "wb.locator.selector": "CSS 选择器，如 #hit",
+  "wb.locator.body": "评论…",
+  "wb.locator.saved": "评论已保存",
+  "wb.locator.err": "评论失败：{0}",
   "key.banner.goConfigure": "去配置 →",
   "key.banner.notConfigured": " 尚未配置 API Key，发送消息会失败。",
   "label.apiKey": "API Key",
@@ -691,6 +814,11 @@ Object.assign(I18N.zh, {
   "nb.cell.statusOk": "ok",
   "nb.cell.statusRunning": "running",
   "nb.kernel.shared": "与 Agent 共享",
+  "nb.owner.agent": "Agent",
+  "nb.owner.user_repl": "用户 REPL",
+  "nb.owner.repair": "Repair",
+  "nb.owner.review_scratch": "Review scratch",
+  "nb.owner.generation": "generation {0}",
   "nb.chips.all": "全部",
   "nb.empty": "运行任务后，这里会显示 Notebook 代码单元与输出。",
   "nb.env.placeholder": "环境…",
@@ -887,6 +1015,7 @@ Object.assign(I18N.zh, {
   "delegation.active": "活动 {0}",
   "delegation.turns": "边界 {0}/{1}",
   "delegation.steering": "消息：{0} 待投递 · {1} 已投递",
+  "delegation.childFrame": "帧 {0}",
   "branch.current": "当前",
   "branch.viewOnly": "未激活 · 仅查看",
   "branch.currentSummary": "当前分支：{0}",
@@ -966,6 +1095,7 @@ Object.assign(I18N.zh, {
   "perm.continuePrompt": "继续。刚才批准的是守护进程重启前被中断的操作；请先重新评估当前状态，只在仍有必要时发起新的操作，不要假设原操作已经执行。",
   "perm.lbl.rememberRule": "记住规则（可用 * 通配）",
   "perm.lbl.rememberScope": "记住范围",
+  "perm.lbl.resolvedPath": "解析后路径：{0}",
   "perm.placeholder.denyReason": "（可选）拒绝原因，会反馈给智能体",
   "perm.scope.conversation": "本对话",
   "perm.scope.global": "全局",
@@ -977,6 +1107,10 @@ Object.assign(I18N.zh, {
   "perm.status.afterRestartDenied": "已拒绝；守护进程重启后，原操作未执行。",
   "perm.status.denied": "已拒绝",
   "perm.sub.approvalNeeded": "智能体请求执行下面的操作，需要你的批准。",
+  "perm.review.credential_path": "解析后的目标命中了凭据路径规则。允许前请核对实际路径。",
+  "perm.review.dynamic_file_search": "此搜索会在开始后才确定要读取的文件。允许前请核对搜索范围。",
+  "perm.review.unreviewable_path": "自动复核无法确定目标路径，需要人工确认。",
+  "perm.review.verification_failed": "自动文件安全复核失败，需要人工确认。",
   "perm.title.run": "运行 {0}",
   "plan.approve": "批准并执行",
   "plan.approveFailed": "批准失败：{0}",
@@ -1082,8 +1216,17 @@ Object.assign(I18N.zh, {
   "prov.exec.downloadPython": "只下载 Python Notebook (.ipynb)",
   "prov.exec.downloadR": "只下载 R Notebook (.ipynb)",
   "prov.exec.downloadMarkdown": "下载 Markdown 记录 (.md)",
+  "prov.exec.downloadSources": "下载已执行代码（sources.zip，含子代理）",
   "prov.exec.downloadMore": "其他导出格式",
   "prov.exec.noRecords": "暂无执行记录。",
+  "nb.exec.toggle": "已执行代码",
+  "nb.exec.title": "已执行代码（执行历史）",
+  "nb.exec.note": "这是主会话与被委派子代理实际执行过的代码——含失败与中断的单元。它是执行历史，不是 Artifacts / 交付物。",
+  "nb.exec.root": "主会话",
+  "nb.exec.empty": "该 frame 尚无已执行代码。",
+  "nb.exec.loadFailed": "无法加载已执行代码：{0}",
+  "nb.exec.cellCount": "{0} 个单元",
+  "nb.exec.failCount": "{0} 个失败",
   "prov.msg.loadFailed": "无法加载对话：{0}",
   "prov.msg.loading": "加载对话…",
   "prov.msg.noRecords": "暂无对话记录。",
@@ -1092,6 +1235,11 @@ Object.assign(I18N.zh, {
   "prov.msg.roleUser": "User",
   "prov.review.noLineage": "暂无溯源信息（execution log 为空或未记录文件 I/O）。",
   "prov.review.producedBy": "由单元 {0} 生成",
+  "prov.review.producedByIdentity": "由 Cell {0} 生成",
+  "prov.review.producerFrame": "{0} frame · {1}",
+  "prov.review.nonCellProducer": "由非 Cell 动作生成",
+  "prov.review.sameBytesCapture": "相同字节 · capture observation",
+  "prov.review.versionCapture": "版本捕获 · capture observation",
   "prov.review.readsInputs": "读取 / 输入",
   "prov.review.saved": "已保存 · {0}",
   "prov.review.viewCode": "查看产生它的代码",
@@ -1116,6 +1264,21 @@ Object.assign(I18N.zh, {
   "sessionMenu.downloadArtifacts": "下载产物",
   "sessionMenu.exportMarkdown": "导出为 Markdown",
   "sessionMenu.viewNotebook": "查看 Notebook",
+  "compute.menu.runLocation": "运行位置",
+  "compute.location.local": "本机（守护进程）",
+  "compute.location.localHint": "内核跑在这台运行 daemon 的机器上。",
+  "compute.dialog.title": "这个会话在哪里运行",
+  "compute.dialog.notConfigured": "本 daemon 未开启 worker 监听，无法在集群上运行会话。",
+  "compute.dialog.release": "释放集群资源",
+  "compute.badge.local": "本机",
+  "compute.blocked.allocation": "排队等待资源",
+  "compute.blocked.workspace": "准备工作区",
+  "compute.blocked.worker": "等待 worker 连回",
+  "compute.blocked.kernel": "启动内核",
+  "compute.badge.ready": "集群就绪",
+  "compute.lost.title": "内核状态已丢失",
+  "compute.lost.body": "这个会话的资源被回收，内核的内存随之丢失（变量、import、已加载的数据都不在了）。会话已在新的 epoch 上继续，但之前定义的东西需要重新执行。",
+  "compute.lost.dismiss": "知道了",
   "sessionMenu.moveToFolder": "移动到文件夹",
   "skill.bodyPlaceholder": "SKILL.md 正文（Markdown 配方：步骤、代码、注意事项…）",
   "skill.descPlaceholder": "一句话描述（用于技能检索）",
@@ -1162,6 +1325,19 @@ Object.assign(I18N.zh, {
   "step.artifact.openArtifact": "打开产物",
   "step.artifact.showOutput": "显示输出",
   "step.card.defaultTitle": "步骤",
+  "step.delegate.artifacts": "产物",
+  "step.delegate.children": "{0} 个子任务",
+  "step.delegate.hideDetails": "隐藏详情",
+  "step.delegate.limitations": "局限",
+  "step.delegate.missingArtifacts": "缺少必需产物",
+  "step.delegate.showDetails": "显示详情",
+  "step.delegate.status.blocked": "受阻",
+  "step.delegate.status.completed": "已完成",
+  "step.delegate.status.failed": "失败",
+  "step.delegate.status.partial": "部分完成",
+  "step.delegate.status.pending": "已启动",
+  "step.delegate.status.stopped": "已停止",
+  "step.delegate.turns": "轮次 {0}/{1}",
   "step.env.installed": "已安装：{0}",
   "step.env.missing": "缺少：{0}",
   "step.env.ready": "就绪",
@@ -1244,6 +1420,12 @@ Object.assign(I18N.zh, {
   "versions.empty": "暂无版本历史。",
   "versions.load.err": "加载失败：{0}",
   "versions.modal.title": "版本历史 — {0}",
+  "versions.diff": "比较 v{0} ↔ v{1}",
+  "versions.diff.title": "v{0} ↔ v{1} 文本差异",
+  "versions.diff.loading": "正在加载差异…",
+  "versions.diff.empty": "这两个版本的文本内容相同。",
+  "versions.diff.err": "差异加载失败：{0}",
+  "versions.diff.truncated": "差异过长，仅显示前 {0} 个字符。",
   "versions.restore": "恢复此版本",
   "versions.restore.err": "恢复失败：{0}",
   "versions.restored": "已恢复到 v{0}",
@@ -1265,6 +1447,7 @@ Object.assign(I18N.zh, {
   "viewer.renderer.error": "无法预览此产物，可继续下载原文件。",
   "viewer.renderer.matched": "匹配：{0}",
   "viewer.renderer.version": "版本 {0}",
+  "viewer.renderer.noscript": "预览不执行脚本。交互式报表请下载后在本地打开。",
   "viewer.sequence.omitted": "为保持界面流畅，其余 {0} 个残基未展开。",
   "viewer.sequence.summary": "{0} 条序列 · {1} 个残基 · {2}",
   "viewer.table.shape": "共 {0} 行 × {1} 列",
@@ -1383,6 +1566,23 @@ Object.assign(I18N.en, {
   "conv.title.default": "Session",
   "conv.title.rename": "Rename session (press Enter to save)",
   "cust.compute.desc": "Local kernel environments, preinstalled packages and accelerators",
+  "environment.readiness.bannerTitle": "The standard science environment is not ready",
+  "environment.readiness.bannerMissing": "Missing {0} environment(s) and {1} package(s); resolve these before the first science Cell runs.",
+  "environment.readiness.bannerUnavailable": "Science-environment readiness cannot be confirmed; an unknown state is not shown as ready.",
+  "environment.readiness.openCompute": "View gaps and repair command",
+  "environment.readiness.cardTitle": "Standard profile readiness",
+  "environment.readiness.ready": "Ready: the standard Python and R dependencies were checked.",
+  "environment.readiness.needsSetup": "One or more standard environments must be created.",
+  "environment.readiness.needsRepair": "The environments exist, but packages from the standard manifest are missing.",
+  "environment.readiness.unavailable": "The local readiness check could not complete; the UI does not guess that it is ready.",
+  "environment.readiness.missingEnvironments": "Missing environments",
+  "environment.readiness.missingPackages": "Packages missing from {0}",
+  "environment.readiness.remediation": "Managed repair command",
+  "environment.readiness.explicitOnly": "Copy only; you must run it explicitly. Nothing is installed automatically.",
+  "environment.readiness.copy": "Copy command",
+  "environment.readiness.copied": "Repair command copied",
+  "environment.readiness.refresh": "Refresh readiness",
+  "environment.readiness.sendBlocked": "The first science Cell was stopped before startup. Complete the standard environment setup first.",
   "cust.compute.gpuAvailable": "Available",
   "cust.compute.gpuName": "GPU",
   "cust.compute.gpuUnavailable": "Unavailable (no local GPU; heavy models fall back to annotated CPU approximations, or use Modal/SSH remote compute)",
@@ -1417,6 +1617,18 @@ Object.assign(I18N.en, {
   "cust.compute.preinstalledDetail": "{0} scientific/networking packages preinstalled: {1}",
   "cust.compute.title": "Compute",
   "cust.connectors.cmdPlaceholder": "Launch command, e.g. npx -y @modelcontextprotocol/server-filesystem .",
+  "cust.connectors.editTitle": "Edit connector — {0}",
+  "cust.connectors.commandLabel": "Launch command (JSON string or string array)",
+  "cust.connectors.argsLabel": "Additional arguments (JSON array)",
+  "cust.connectors.envConfigured": "Configured environment variables: {0}",
+  "cust.connectors.envNone": "No environment variables configured",
+  "cust.connectors.envUpdatesLabel": "Add or replace environment variables",
+  "cust.connectors.envUpdatesPlaceholder": "One NAME=value per line; blank keeps existing values",
+  "cust.connectors.envRemoveLabel": "Remove environment variables",
+  "cust.connectors.envRemovePlaceholder": "One NAME per line; only listed variables are removed",
+  "cust.connectors.invalidJson": "Command or arguments are not valid JSON",
+  "cust.connectors.invalidEnv": "Environment updates must use NAME=value lines",
+  "cust.connectors.saved": "Saved connector {0}",
   "cust.connectors.customAddName": "Add custom (command-line MCP server)",
   "cust.connectors.deleteConfirm": "Delete connector {0}?",
   "cust.connectors.desc": "MCP tool servers: connect external tools, the agent calls them with host.mcp.call(id, tool, args)",
@@ -1574,6 +1786,75 @@ Object.assign(I18N.en, {
   "cust.models.subtitle": "Configure the LLM-compatible protocol, Base URL, model, and API Key (takes effect immediately after saving)",
   "cust.models.subtitle2": "Configure multiple LLM APIs (compatible protocol / Base URL / model / key); add, switch, or remove anytime to work with different endpoints",
   "cust.models.updateBtn": "Update",
+  "cust.volc.title": "Volcengine Ark",
+  "cust.volc.notInstalled": "Ark Connector is not installed",
+  "cust.volc.getConnector": "Get Ark Connector",
+  "cust.volc.disconnected": "Not connected",
+  "cust.volc.expired": "Login expired",
+  "cust.volc.connect": "Continue with Volcengine",
+  "cust.volc.loginPrep": "Clicking sign-in opens official Volcengine authorization in your browser. After authorization, copy the complete authorization string shown there (do not copy only the inner code), then paste it back here; OpenAI4S will not open a system terminal.",
+  "cust.volc.reconnectPrep": "Clicking sign-in again opens official Volcengine authorization in your browser. After authorization, copy the complete authorization string shown there (do not copy only the inner code), then paste it back here; the existing Project is normally reused.",
+  "cust.volc.connecting": "Submitting authorization and checking the account…",
+  "cust.volc.authTitle": "Volcengine authorization is ready",
+  "cust.volc.authBody": "The authorization page opens in a new browser tab. Finish Volcengine sign-in, then copy the complete authorization string shown there (usually Base64 text containing code and state) and paste it here; do not copy only the inner code. If you do not see a new page, use the button below to open it again.",
+  "cust.volc.projectHint": "The Project controls which Volcengine resources OpenAI4S can access. Existing profiles are reused; Ark CLI asks once when a first login has multiple Projects.",
+  "cust.volc.cancel": "Cancel",
+  "cust.volc.failed": "Connection failed. Try again.",
+  "cust.volc.projectRequiredTitle": "Account authorized; Project setup remains",
+  "cust.volc.projectRequiredBody": "Authorization is complete, but this Ark CLI still needs Project setup. Run arkcli auth login volc-sso locally, then return here and recheck.",
+  "cust.volc.cliSetupTitle": "One Ark CLI setup step is required",
+  "cust.volc.cliSetupBody": "Run arkcli auth login volc-sso in a local terminal, finish authorization and Project setup, then recheck here.",
+  "cust.volc.retrySetup": "Start sign-in again",
+  "cust.volc.openAuth": "Open authorization page",
+  "cust.volc.codePlaceholder": "Full authorization string",
+  "cust.volc.complete": "Complete login",
+  "cust.volc.connected": "Connected",
+  "cust.volc.project": "Project: {0}",
+  "cust.volc.connectedNoAccessTitle": "Volcengine is connected, but model access is not ready",
+  "cust.volc.noPlanBody": "This account has no Agent Plan, Coding Plan, or usable API key. Buy a plan or create a platform API key; OpenAI4S checks automatically after creation.",
+  "cust.volc.keyMissingTitle": "Account connected; the plan is not ready yet",
+  "cust.volc.keyMissingBody": "A plan was found, but it has no API key for model calls. Create one in the Volcengine console and return; OpenAI4S continues automatically, with no copy and paste.",
+  "cust.volc.keyWaiting": "Waiting for a new API key… Setup continues automatically after it is created.",
+  "cust.volc.keyChoiceTitle": "Choose an API key for OpenAI4S",
+  "cust.volc.keyChoiceBody": "This profile has multiple usable keys and no unique default. Choose once; the key value is never sent to the browser.",
+  "cust.volc.apiKey": "API key",
+  "cust.volc.keyName": "{0} (ending in {1})",
+  "cust.volc.profileMissingTitle": "Account connected; Ark setup is incomplete",
+  "cust.volc.profileMissingBody": "The plan exists, but Ark CLI has no matching Profile. Run sign-in setup again to complete it.",
+  "cust.volc.planInactiveTitle": "Account connected; the plan is not active",
+  "cust.volc.planInactiveBody": "A plan was found, but it is pending or expired. Resolve the plan state and recheck without signing in again.",
+  "cust.volc.seatTitle": "Account connected; a team seat is required",
+  "cust.volc.seatBody": "A team plan was found, but this user has no usable seat. Ask an administrator to assign one, then recheck.",
+  "cust.volc.quotaTitle": "Plan quota is exhausted",
+  "cust.volc.quotaBody": "Your login and configuration remain valid. Recheck after the quota resets, renewing, or switching plans; no new sign-in is needed.",
+  "cust.volc.platformTitle": "Platform API key found; a model Endpoint is still required",
+  "cust.volc.platformBody": "This account can use pay-as-you-go calls, but it first needs a model Endpoint in the Ark console.",
+  "cust.volc.platformReadyTitle": "A usable Endpoint was found",
+  "cust.volc.platformReadyBody": "OpenAI4S found the only invocable Endpoint in this Project and can finish setup now.",
+  "cust.volc.endpointChoiceTitle": "Choose an Endpoint for OpenAI4S",
+  "cust.volc.endpointChoiceBody": "This Project has multiple invocable Endpoints. Choose the one OpenAI4S should use as its active model.",
+  "cust.volc.endpoint": "Endpoint",
+  "cust.volc.useEndpoint": "Use this Endpoint",
+  "cust.volc.choiceTitle": "Choose a plan for OpenAI4S",
+  "cust.volc.choiceBody": "This account has multiple active plans. Select one; OpenAI4S configures only the chosen plan.",
+  "cust.volc.checkFailedTitle": "Account connected; resource check is incomplete",
+  "cust.volc.checkFailedBody": "Plan or API-key status could not be read. Recheck without signing in again.",
+  "cust.volc.viewPlans": "View plans",
+  "cust.volc.createKey": "Create API key",
+  "cust.volc.openEndpoints": "Open Endpoint console",
+  "cust.volc.recheck": "Recheck",
+  "cust.volc.rechecking": "Checking account resources…",
+  "cust.volc.rechecked": "Check complete; resources are up to date",
+  "cust.volc.plan": "Plan",
+  "cust.volc.usePlan": "Use this plan",
+  "cust.volc.ready": "Ready",
+  "cust.volc.switch": "Switch account",
+  "cust.volc.disconnect": "Disconnect from OpenAI4S",
+  "cust.volc.disconnectConfirm": "Remove this Volcengine configuration from OpenAI4S? Ark CLI will remain signed in.",
+  "cust.volc.quota": "Plan quota",
+  "cust.volc.reset": "Resets: {0}",
+  "cust.volc.configureFailed": "Automatic setup failed: {0}",
+  "cust.volc.refreshFailed": "Refresh failed: {0}",
   "cust.network.allowName": "Allow network access",
   "cust.network.desc": "Network access (the agent's web_search / web_fetch / bash and code requests)",
   "cust.network.disabledDesc": "Disabled — the agent uses only local knowledge and existing files",
@@ -1597,6 +1878,10 @@ Object.assign(I18N.en, {
   "cust.perm.scope.project": "This project",
   "cust.perm.title": "Permissions",
   "cust.perm.toolPlaceholder": "Tool (bash / write_file / *)",
+  "cust.skills.collection": "{0} collection ({1} skills)",
+  "cust.skills.collectionDesc": "Pinned read-only third-party recipes, collapsed by default; expand to enable or disable them individually.",
+  "cust.skills.collectionHide": "Hide",
+  "cust.skills.collectionShow": "Show",
   "cust.skills.deleteConfirm": "Delete skill {0}?",
   "cust.skills.desc": "{0} research skills; toggles control whether the agent can use them, and you can create/import your own",
   "cust.skills.importBtn": "Import SKILL.md",
@@ -1657,6 +1942,10 @@ Object.assign(I18N.en, {
   "editor.label": "Editing {0}",
   "empty.sub": "Describe your research task and the agent will write Python, search the web, invoke skills, and produce charts/reports/structure files. Try:",
   "empty.title": "Start a new analysis",
+  "review.badge.candidate": "Candidate · not verified",
+  "review.badge.verified": "Verified",
+  "review.badge.completed_with_issues": "Completed · unverified",
+  "review.badge.review_unavailable": "Unavailable · not verified",
   "export.artifactsHeading": "## Artifacts",
   "export.messageAssistant": "🤖 Assistant",
   "export.messageUser": "🧑 User",
@@ -1683,6 +1972,20 @@ Object.assign(I18N.en, {
   "kernel.started": "Kernel started",
   "kernel.stopped": "Kernel stopped (session preserved; start anytime to resume)",
   "ketcher.modalTitle": "Ketcher — Chemical Structure Editor",
+  "wb.table.filter": "Filter col:value",
+  "wb.table.prev": "Previous",
+  "wb.table.next": "Next",
+  "wb.table.meta": "{0} rows · showing {1}–{2}",
+  "wb.ketcher.edit": "Edit in Ketcher",
+  "wb.locator.title": "Location comments (sent on the next turn)",
+  "wb.locator.pdfPage": "PDF page",
+  "wb.locator.pdfPrev": "Previous page",
+  "wb.locator.pdfNext": "Next page",
+  "wb.locator.quote": "Selected source text",
+  "wb.locator.selector": "CSS selector, e.g. #hit",
+  "wb.locator.body": "Comment…",
+  "wb.locator.saved": "Comment saved",
+  "wb.locator.err": "Comment failed: {0}",
   "key.banner.goConfigure": "Configure →",
   "key.banner.notConfigured": " No API Key configured yet; sending messages will fail.",
   "label.apiKey": "API Key",
@@ -1720,6 +2023,11 @@ Object.assign(I18N.en, {
   "nb.cell.statusOk": "ok",
   "nb.cell.statusRunning": "running",
   "nb.kernel.shared": "shared with the agent",
+  "nb.owner.agent": "Agent",
+  "nb.owner.user_repl": "User REPL",
+  "nb.owner.repair": "Repair",
+  "nb.owner.review_scratch": "Review scratch",
+  "nb.owner.generation": "generation {0}",
   "nb.chips.all": "All",
   "nb.empty": "After running a task, Notebook code cells and outputs will appear here.",
   "nb.env.placeholder": "Environment…",
@@ -1916,6 +2224,7 @@ Object.assign(I18N.en, {
   "delegation.active": "Active {0}",
   "delegation.turns": "Boundary {0}/{1}",
   "delegation.steering": "Messages: {0} queued · {1} delivered",
+  "delegation.childFrame": "frame {0}",
   "branch.current": "current",
   "branch.viewOnly": "inactive · view only",
   "branch.currentSummary": "Current branch: {0}",
@@ -1995,6 +2304,7 @@ Object.assign(I18N.en, {
   "perm.continuePrompt": "Continue. The operation I just approved was interrupted before the daemon restarted. Re-evaluate the current state first, issue a fresh action only if it is still needed, and do not assume the original operation executed.",
   "perm.lbl.rememberRule": "Remember rule (use * as wildcard)",
   "perm.lbl.rememberScope": "Remember scope",
+  "perm.lbl.resolvedPath": "Resolved path: {0}",
   "perm.placeholder.denyReason": "(Optional) reason for denial, will be sent to the agent",
   "perm.scope.conversation": "This conversation",
   "perm.scope.global": "Global",
@@ -2006,6 +2316,10 @@ Object.assign(I18N.en, {
   "perm.status.afterRestartDenied": "Denied; the original operation did not execute after the daemon restart.",
   "perm.status.denied": "Denied",
   "perm.sub.approvalNeeded": "The agent requests to perform the operation below and needs your approval.",
+  "perm.review.credential_path": "The resolved destination matches a credential-path rule. Verify the actual path before allowing it.",
+  "perm.review.dynamic_file_search": "This search chooses the files it will read only after it starts. Verify the search scope before allowing it.",
+  "perm.review.unreviewable_path": "Automatic review could not establish the destination path. Manual confirmation is required.",
+  "perm.review.verification_failed": "Automatic file-safety verification failed. Manual confirmation is required.",
   "perm.title.run": "Run {0}",
   "plan.approve": "Approve and execute",
   "plan.approveFailed": "Approval failed: {0}",
@@ -2111,8 +2425,17 @@ Object.assign(I18N.en, {
   "prov.exec.downloadPython": "Python notebook only (.ipynb)",
   "prov.exec.downloadR": "R notebook only (.ipynb)",
   "prov.exec.downloadMarkdown": "Markdown record (.md)",
+  "prov.exec.downloadSources": "Executed code sources (zip, incl. sub-agents)",
   "prov.exec.downloadMore": "Other export formats",
   "prov.exec.noRecords": "No execution records yet.",
+  "nb.exec.toggle": "Executed code",
+  "nb.exec.title": "Executed code (execution history)",
+  "nb.exec.note": "Code actually run by this session and its delegated sub-agents — failed and interrupted cells included. This is execution history, not Artifacts / deliverables.",
+  "nb.exec.root": "Root session",
+  "nb.exec.empty": "No executed code recorded for this frame yet.",
+  "nb.exec.loadFailed": "Failed to load executed code: {0}",
+  "nb.exec.cellCount": "{0} cells",
+  "nb.exec.failCount": "{0} failed",
   "prov.msg.loadFailed": "Failed to load conversation: {0}",
   "prov.msg.loading": "Loading conversation…",
   "prov.msg.noRecords": "No conversation records yet.",
@@ -2121,6 +2444,11 @@ Object.assign(I18N.en, {
   "prov.msg.roleUser": "User",
   "prov.review.noLineage": "No provenance information (execution log is empty or no file I/O was recorded).",
   "prov.review.producedBy": "produced by cell {0}",
+  "prov.review.producedByIdentity": "produced by Cell {0}",
+  "prov.review.producerFrame": "{0} frame · {1}",
+  "prov.review.nonCellProducer": "produced by a non-Cell action",
+  "prov.review.sameBytesCapture": "same bytes · capture observation",
+  "prov.review.versionCapture": "version capture · capture observation",
   "prov.review.readsInputs": "reads / inputs",
   "prov.review.saved": "saved · {0}",
   "prov.review.viewCode": "View the code that produced it",
@@ -2145,6 +2473,21 @@ Object.assign(I18N.en, {
   "sessionMenu.downloadArtifacts": "Download artifacts",
   "sessionMenu.exportMarkdown": "Export as Markdown",
   "sessionMenu.viewNotebook": "View notebook",
+  "compute.menu.runLocation": "Run location",
+  "compute.location.local": "This machine (daemon)",
+  "compute.location.localHint": "The kernel runs on the host running the daemon.",
+  "compute.dialog.title": "Where this session runs",
+  "compute.dialog.notConfigured": "This daemon has no worker listener, so sessions cannot run on a cluster.",
+  "compute.dialog.release": "Release the cluster resource",
+  "compute.badge.local": "local",
+  "compute.blocked.allocation": "queued for a resource",
+  "compute.blocked.workspace": "preparing the workspace",
+  "compute.blocked.worker": "waiting for the worker to dial in",
+  "compute.blocked.kernel": "starting the kernel",
+  "compute.badge.ready": "cluster ready",
+  "compute.lost.title": "Kernel state was lost",
+  "compute.lost.body": "This session's resource went away and the kernel's memory went with it — variables, imports and loaded data are gone. The session continued on a new attempt, but anything defined earlier has to be run again.",
+  "compute.lost.dismiss": "Got it",
   "sessionMenu.moveToFolder": "Move to folder",
   "skill.bodyPlaceholder": "SKILL.md body (Markdown recipe: steps, code, caveats…)",
   "skill.descPlaceholder": "One-line description (used for skill retrieval)",
@@ -2191,6 +2534,19 @@ Object.assign(I18N.en, {
   "step.artifact.openArtifact": "Open artifact",
   "step.artifact.showOutput": "Show output",
   "step.card.defaultTitle": "step",
+  "step.delegate.artifacts": "artifacts",
+  "step.delegate.children": "{0} sub-tasks",
+  "step.delegate.hideDetails": "Hide details",
+  "step.delegate.limitations": "limitations",
+  "step.delegate.missingArtifacts": "missing required artifacts",
+  "step.delegate.showDetails": "Show details",
+  "step.delegate.status.blocked": "blocked",
+  "step.delegate.status.completed": "completed",
+  "step.delegate.status.failed": "failed",
+  "step.delegate.status.partial": "partial",
+  "step.delegate.status.pending": "started",
+  "step.delegate.status.stopped": "stopped",
+  "step.delegate.turns": "turns {0}/{1}",
   "step.env.installed": "installed: {0}",
   "step.env.missing": "missing: {0}",
   "step.env.ready": "ready",
@@ -2273,6 +2629,12 @@ Object.assign(I18N.en, {
   "versions.empty": "No version history yet.",
   "versions.load.err": "Load failed: {0}",
   "versions.modal.title": "Version history — {0}",
+  "versions.diff": "Compare v{0} ↔ v{1}",
+  "versions.diff.title": "Text diff v{0} ↔ v{1}",
+  "versions.diff.loading": "Loading diff…",
+  "versions.diff.empty": "These versions have identical text content.",
+  "versions.diff.err": "Could not load diff: {0}",
+  "versions.diff.truncated": "Diff is long; showing the first {0} characters.",
   "versions.restore": "Restore this version",
   "versions.restore.err": "Restore failed: {0}",
   "versions.restored": "Restored to v{0}",
@@ -2294,6 +2656,7 @@ Object.assign(I18N.en, {
   "viewer.renderer.error": "This artifact could not be previewed. You can still download the original file.",
   "viewer.renderer.matched": "Matched by {0}",
   "viewer.renderer.version": "Version {0}",
+  "viewer.renderer.noscript": "This preview runs no scripts. Download an interactive report to use it.",
   "viewer.sequence.omitted": "{0} additional residues are collapsed to keep the viewer responsive.",
   "viewer.sequence.summary": "{0} sequences · {1} residues · {2}",
   "viewer.table.shape": "{0} rows × {1} columns",
@@ -2752,7 +3115,7 @@ function sanitizeBranches(payload) {
   };
 }
 function branchUndoFromProjection(state) {
-  if (!state || !state.branch_id) return null;
+  if (!state || !state.branch_id || !state.capabilities || state.capabilities.revert !== true) return null;
   const branch = (state.branches || []).find(item => item.branch_id === state.branch_id);
   const checkpoint = branch && (branch.checkpoints || []).find(item => item.checkpoint_id === branch.head_checkpoint_id);
   return checkpoint && checkpoint.undo_revert_checkpoint_id ? {
@@ -2890,6 +3253,7 @@ function sanitizeDelegations(payload) {
       child_id: publicText(item.child_id, 96), parent_child_id: publicText(item.parent_child_id, 96),
       frame_id: publicText(item.frame_id, 96), name: publicText(item.name, 160),
       status: publicText(item.status, 32), depth: Math.min(count(item.depth), 16),
+      task_status: publicText(item.task_status, 32),
       stop_reason: publicText(item.stop_reason, 160), error: publicText(item.error, 240),
       created_at: item.created_at, started_at: item.started_at, finished_at: item.finished_at,
       progress: { turn_boundary: count(progress.turn_boundary), max_turns: count(progress.max_turns) || null },
@@ -2909,6 +3273,28 @@ function sanitizeDelegations(payload) {
     } : { total: children.length, pending: 0, running: 0, done: 0, failed: 0, stopped: 0 },
     children,
   };
+}
+function mergeDelegationChildEvent(m) {
+  // Live upsert of one child row from the server-side delegation_child_event
+  // projection: the panel updates as soon as the child moves, while the REST
+  // refresh scheduled by the caller stays the durable truth. The raw child
+  // rides through sanitizeDelegations, so the browser-side exclusion belt
+  // (no output, no steering text) applies here exactly as it does on load.
+  const child = m && m.child && typeof m.child === "object" ? m.child : null;
+  if (!child || !child.child_id) return;
+  const clean = sanitizeDelegations({ children: [child] }).children[0];
+  if (!clean) return;
+  const state = S.delegationState && typeof S.delegationState === "object" && Array.isArray(S.delegationState.children)
+    ? S.delegationState
+    : { root_frame_id: publicText(m.root_frame_id, 96), initialized: true, budget: null,
+      stats: { total: 0, pending: 0, running: 0, done: 0, failed: 0, stopped: 0 }, children: [] };
+  const at = state.children.findIndex(item => item.child_id === clean.child_id);
+  if (at >= 0) state.children[at] = Object.assign({}, state.children[at], clean);
+  else state.children.push(clean);
+  const stats = { total: state.children.length, pending: 0, running: 0, done: 0, failed: 0, stopped: 0 };
+  state.children.forEach(item => { const key = String(item.status || ""); if (stats[key] !== undefined) stats[key] += 1; });
+  state.stats = stats;
+  S.delegationState = state;
 }
 async function optionalApi(paths) {
   for (const path of paths) { try { return await api(path); } catch {} }
@@ -3001,10 +3387,11 @@ function scheduleWorkbenchRefresh(delay = 180) {
   clearTimeout(S._workbenchTimer);
   S._workbenchTimer = setTimeout(() => loadWorkbenchState(S.currentId, true), delay);
 }
-function scheduleBranchConversationResync(fid, delay = 120) {
+function scheduleConversationResync(fid, delay = 120) {
   clearTimeout(S._branchConversationTimer);
   S._branchConversationTimer = setTimeout(() => { if (S.currentId === fid) openConversation(fid, S.project); }, delay);
 }
+function scheduleBranchConversationResync(fid, delay = 120) { scheduleConversationResync(fid, delay); }
 function latestCellForLanguage(language) {
   return (S.cells || []).concat(S.liveCells || []).filter(cell => String(cell.language || cell.kernel_id || "python").toLowerCase().startsWith(language)).slice(-1)[0] || null;
 }
@@ -3015,7 +3402,8 @@ function runtimeSummary() {
   const recovery = S.recoveryState || {};
   const recoveryStatus = String(recovery.status || "").toLowerCase();
   const trustState = publicText(recovery.trust_state || (S.recoveryActions || {}).trust_state || (_kc.st || {}).trust_state, 32);
-  const viewOnly = recovery.view_only === true || (S.recoveryActions || {}).view_only === true || (_kc.st || {}).view_only === true;
+  const explicitRecoveryRequired = recovery.explicit_recovery_required === true || (S.recoveryActions || {}).explicit_recovery_required === true || (_kc.st || {}).explicit_recovery_required === true;
+  const viewOnly = explicitRecoveryRequired || recovery.view_only === true || (S.recoveryActions || {}).view_only === true || (_kc.st || {}).view_only === true;
   let status = "ended";
   if (/fail|error/.test(recoveryStatus)) status = "failed";
   else if (/partial/.test(recoveryStatus)) status = "partial";
@@ -4645,6 +5033,10 @@ function renderDelegationPanel() {
     row.style.setProperty("--delegation-indent", Math.min(child.depth || 0, 4) * 10 + "px");
     const head = el("div", "delegation-child-head");
     head.appendChild(el("span", "delegation-child-name", child.name || shortRuntime(child.child_id)));
+    // Two truths, two chips: the lifecycle status (pending/running/done/…)
+    // and, once terminal, the machine-readable task_status — green only for
+    // completed, so a child that merely *finished* cannot read as success.
+    if (child.task_status) head.appendChild(delegateTaskChip(child));
     head.appendChild(el("span", "timeline-status " + String(child.status || "unknown").toLowerCase(), child.status || "unknown"));
     row.appendChild(head);
     const details = el("div", "delegation-child-details");
@@ -4652,6 +5044,7 @@ function renderDelegationPanel() {
     if (child.overrides && child.overrides.model) details.appendChild(el("span", "timeline-pill", child.overrides.model));
     if (child.overrides && child.overrides.steps) details.appendChild(el("span", "timeline-pill", "steps " + child.overrides.steps));
     if (child.steering && (child.steering.queued || child.steering.delivered)) details.appendChild(el("span", "timeline-pill", t("delegation.steering", child.steering.queued || 0, child.steering.delivered || 0)));
+    if (child.frame_id) { const ref = el("span", "timeline-pill dlg-frame-ref", t("delegation.childFrame", shortRuntime(child.frame_id))); ref.title = child.frame_id; details.appendChild(ref); }
     row.appendChild(details);
     if (child.error || child.stop_reason) row.appendChild(el("div", "delegation-child-message", child.error || child.stop_reason));
     // Only a child that is actually going can be stopped or steered. Offering
@@ -4866,16 +5259,39 @@ function onEvent(m) {
     if (S.activeTab === "timeline") renderActionTimeline(); if (S.activeTab === "notebook") renderNotebook();
   } }
   else if (["delegation_child_event", "delegation_state", "delegation_progress", "delegation_steering"].includes(m.type)) { if (mine(fid)) {
+    // Nested live rendering: upsert the projected child into the panel state
+    // now; the debounced REST refresh below remains the durable truth. Child
+    // cells stay owned by the child frame — nothing here touches S.cells, so
+    // they can never render as root Notebook cells.
+    if (m.type === "delegation_child_event") mergeDelegationChildEvent(m);
     scheduleWorkbenchRefresh(60); if (S.activeTab === "timeline") renderActionTimeline();
   } }
   else if (["sandbox", "sandbox_status", "security_status"].includes(m.type)) { if (mine(fid)) { S.securityState = sanitizeSecurity(m); if (S.activeTab === "timeline") renderActionTimeline(); } }
-  else if (m.type === "text_chunk") { if (mine(fid) && !isStaleTurnEvent(m)) feed(m.block_type || "text", m.chunk || "", m); }
+  else if (m.type === "text_chunk") { if (mine(fid) && !isStaleTurnEvent(m)) feed(
+    // A persist-first gated turn can be reopened while its Reviewer is still
+    // running. REST has already rendered the canonical candidate in that case,
+    // and replaying the same provisional bytes below it creates a second answer.
+    // Shared turn/execution identity lets the durable row own those chunks.
+    m.block_type || "text", m.chunk || "", m, storedCandidateOwnsChunk(m)
+  ); }
   else if (m.type === "step") { if (mine(fid)) addLiveStep(m); }
   else if (m.type === "step_update") { if (mine(fid)) updateLiveStep(m); }
   else if (m.type === "plan_ready") { if (mine(fid)) renderPlanCard(m.plan, m.status); }
   else if (m.type === "plan_progress") { if (mine(fid)) updatePlanProgress(m); }
   else if (m.type === "await_permission") { if (mine(fid)) { renderPermissionCard(m); scheduleWorkbenchRefresh(); } }
   else if (m.type === "permission_resolved") { if (mine(fid)) { resolvePermissionCard(m); scheduleWorkbenchRefresh(); } }
+  else if (m.type === "candidate_ready" && m.gates_completion) {
+    if (mine(fid) || mine(m.root_frame_id)) markCandidateReady(m);
+  }
+  else if (m.type === "auto_run_terminal") {
+    // This closes the durable audit run, not the answer delivery. Keep the
+    // Timeline fresh, but wait for candidate_resolved (or the final frame
+    // receipt) before changing the badge on user-visible prose.
+    if (mine(fid) || mine(m.root_frame_id)) scheduleWorkbenchRefresh(60);
+  }
+  else if (m.type === "candidate_resolved") {
+    if (mine(fid) || mine(m.root_frame_id)) applyCandidateResolution(m, fid);
+  }
   else if (m.type === "frame_update") {
     if (mine(m.frame_id) || mine(fid)) {
       // Unconditional, and deliberately outside the `!S.running` guard below:
@@ -4884,13 +5300,13 @@ function onEvent(m) {
       // for.
       if (m.status === "processing") activateTurnTicket(m.request_id, m.execution_id);
       if (m.status === "processing" && !S.running) { S.running = true; enableComposer(false); $("#cancel-btn").classList.remove("hidden"); resumeWatch(fid, S._openGen); }  // a turn observed on the WS (e.g. started from another tab) — watchdog covers a missed terminal event
-      if (["completed","failed","cancelled","success","done","ready"].includes(m.status)) {
+      if (["completed","failed","cancelled","blocked_by_guardian","success","done","ready"].includes(m.status)) {
         // A terminal event for a turn that is no longer on screen may not
         // close the one that is: no hint, no teardown, no ticket cleared. The
         // workbench still refreshes, because the artifacts and cells that turn
         // produced are real.
         if (isStaleTurnEvent(m)) scheduleWorkbenchRefresh();
-        else { turnDone(m.status, m); scheduleWorkbenchRefresh(); }
+        else { if (m.review_status) applyFinalReviewStatus(m, fid); handleEnvironmentReadinessTerminal(m); turnDone(m.status, m); scheduleWorkbenchRefresh(); }
       }
     }
     loadSessions();
@@ -5043,8 +5459,10 @@ function startStream() {
   S.liveCells = []; S._liveCell = null; down();
 }
 const ensure = () => { if (!S.stream) startStream(); return S.stream; };
-function feed(kind, chunk, event) {
+function feed(kind, chunk, event, storedOwnsChunk = false) {
+  if (storedOwnsChunk) return;
   const st = ensure();
+  rememberCandidateIdentity(st.wrap, event);
   const structuredCellId = event && (event.producing_cell_id || event.cell_id);
   if (kind === "tool") {
     const cellHeader = !!(event && event.cell_index != null);
@@ -5077,8 +5495,174 @@ function feed(kind, chunk, event) {
       if (st.toolMeta) { const n = (st.toolPre.textContent.match(/\n/g) || []).length; st.toolMeta.textContent = n > 1 ? (n + (n === 1 ? " line" : " lines")) : "done"; }
       if (!structuredCellId) nbLiveAppend(add);
     }
-  } else { st.text += chunk; st.full += chunk; st.md.classList.add("cursor"); scheduleRender(st); return; }
+  } else {
+    st.text += chunk; st.full += chunk; st.md.classList.add("cursor");
+    // Stage 4: this chunk is a candidate, not the answer. It is readable and
+    // copyable for the whole reviewer round-trip, so it has to say so on the
+    // block itself -- a badge that only appears after the verdict would leave
+    // the most dangerous window, the one before it, unlabelled.
+    if (event && (event.provisional || event.review_status === "candidate")) {
+      setLiveReviewBadge("candidate");
+    }
+    scheduleRender(st); return;
+  }
   down();
+}
+function candidateIdentityText(value) {
+  return value == null ? "" : String(value).trim().slice(0, 192);
+}
+// The REST row and the WS receipt use the public top-level fields. The nested
+// fallbacks keep this additive for an older captured response without exposing
+// arbitrary message metadata to selectors.
+function candidateIdentity(value) {
+  const raw = value && typeof value === "object" ? value : {};
+  const review = raw.review_status && typeof raw.review_status === "object" ? raw.review_status : {};
+  const meta = raw.metadata && typeof raw.metadata === "object" ? raw.metadata : {};
+  return {
+    messageId: candidateIdentityText(raw.message_id || raw.candidate_message_id || raw.replacement_message_id || review.message_id || meta.message_id),
+    turnId: candidateIdentityText(raw.turn_id || raw.candidate_turn_id || review.turn_id || meta.turn_id),
+    executionId: candidateIdentityText(raw.execution_id || review.execution_id || meta.execution_id),
+  };
+}
+function rememberCandidateIdentity(node, value) {
+  const identity = candidateIdentity(value);
+  if (!node || !node.dataset) return identity;
+  const bind = (key, next) => { if (next && (!node.dataset[key] || node.dataset[key] === next)) node.dataset[key] = next; };
+  bind("messageId", identity.messageId); bind("turnId", identity.turnId); bind("executionId", identity.executionId);
+  return identity;
+}
+function candidateNodeMatches(node, identity) {
+  if (!node || !node.dataset || !identity) return false;
+  if (identity.messageId) return node.dataset.messageId === identity.messageId;
+  if (identity.turnId) return node.dataset.turnId === identity.turnId && (!identity.executionId || !node.dataset.executionId || node.dataset.executionId === identity.executionId);
+  return !!identity.executionId && node.dataset.executionId === identity.executionId;
+}
+// Once the server supplies a durable message id, only that exact row may be
+// changed. Turn/execution identity exists solely for pre-promotion stream and
+// replay de-duplication; it is never a replacement target fallback.
+function candidateMessageNode(value) {
+  const identity = candidateIdentity(value);
+  const host = $("#messages");
+  const nodes = host ? Array.from(host.querySelectorAll(".msg.assistant")) : [];
+  if (identity.messageId) {
+    return nodes.find(node => node.dataset && node.dataset.messageId === identity.messageId) || null;
+  }
+  return nodes.find(node => candidateNodeMatches(node, identity)) || null;
+}
+function reviewStatusFrom(value) {
+  const review = value && value.review_status;
+  return candidateIdentityText(review && typeof review === "object" ? review.status : review);
+}
+function reviewTruthFrom(value) {
+  const review = value && value.review_status;
+  return candidateIdentityText((value && value.user_truth) || (review && typeof review === "object" ? review.user_truth : ""));
+}
+function setMessageReviewBadge(node, status, userTruth) {
+  if (!node || !status) return false;
+  let badge = node.querySelector(":scope > .review-badge");
+  if (!badge) {
+    badge = el("div", "review-badge");
+    const actions = node.querySelector(":scope > .msg-actions");
+    if (actions) node.insertBefore(badge, actions); else node.appendChild(badge);
+  }
+  badge.className = "review-badge review-badge-" + String(status).replace(/[^a-z_]/g, "");
+  badge.textContent = userTruth || t("review.badge." + status);
+  if (node.dataset) node.dataset.reviewStatus = status;
+  S.reviewGate = { status, user_truth: badge.textContent };
+  return true;
+}
+// The live counterpart of the badge `renderStored` puts on a reopened message.
+// One node, replaced in place, so candidate -> verified never stacks two.
+function setLiveReviewBadge(status, userTruth) {
+  const st = S.stream; return !!(st && st.wrap && setMessageReviewBadge(st.wrap, status, userTruth));
+}
+function markCandidateReady(value) {
+  const target = candidateMessageNode(value);
+  if (target) {
+    rememberCandidateIdentity(target, value);
+    // A stale replay must never demote a row REST already projected as final.
+    if (!target.dataset.reviewStatus || target.dataset.reviewStatus === "candidate") setMessageReviewBadge(target, "candidate", value.user_truth);
+    return true;
+  }
+  if (S.stream && S.stream.wrap) rememberCandidateIdentity(S.stream.wrap, value);
+  return setLiveReviewBadge("candidate", value.user_truth);
+}
+function discardDuplicateLiveCandidate(stored, value) {
+  const live = S.stream && S.stream.wrap;
+  if (!stored || !live || live === stored) return;
+  const identity = candidateIdentity(value);
+  rememberCandidateIdentity(live, { turn_id: identity.turnId, execution_id: identity.executionId });
+  if (!candidateNodeMatches(live, { ...identity, messageId: "" })) return;
+  live.remove(); S.stream = null;
+}
+function storedCandidateOwnsChunk(value) {
+  if (!value || (value.block_type || "text") !== "text" || !(value.provisional || reviewStatusFrom(value) === "candidate")) return false;
+  const target = candidateMessageNode(value);
+  if (!target || (S.stream && target === S.stream.wrap) || !target.dataset || !target.dataset.messageId) return false;
+  discardDuplicateLiveCandidate(target, value);
+  if (!target.dataset.reviewStatus || target.dataset.reviewStatus === "candidate") setMessageReviewBadge(target, "candidate", value.user_truth);
+  return true;
+}
+function candidateReplacementText(value) {
+  if (value && typeof value.text === "string") return value.text;
+  return value && typeof value.final_answer === "string" ? value.final_answer : "";
+}
+function candidateReplacementCommitted(value) {
+  const identity = candidateIdentity(value), text = candidateReplacementText(value);
+  return !!(value && value.replaced === true && value.delivered === true && value.durable === true && identity.messageId && text && (value.persisted == null || value.persisted === true) && (value.promotion_committed == null || value.promotion_committed === true));
+}
+// Replace one identified answer, whether it is the current live wrapper or a
+// canonical assistant row already rendered from REST. Message actions capture
+// their text in closures, so refresh them as part of the replacement too.
+function replaceMessageAnswer(node, text) {
+  if (!node || !node.classList || !node.classList.contains("assistant") || !String(text || "").trim()) return false;
+  const hadActions = !!node.querySelector(":scope > .msg-actions");
+  node.querySelectorAll(":scope > .md").forEach(item => item.remove());
+  const md = el("div", "md"); md.innerHTML = renderMd(text);
+  if (S.stream && S.stream.wrap === node) {
+    const badge = node.querySelector(":scope > .review-badge");
+    if (badge) node.insertBefore(md, badge); else node.appendChild(md);
+    S.stream.md = md; S.stream.text = text; S.stream.full = text;
+    S.stream._stableAt = 0; S.stream._stableHtml = "";
+  } else if (node.firstChild) node.insertBefore(md, node.firstChild);
+  else node.appendChild(md);
+  node._messageText = text;
+  if (hadActions) { const actions = node.querySelector(":scope > .msg-actions"); if (actions) actions.remove(); addMsgActions(node, text); }
+  return true;
+}
+// Compatibility seam for callers/tests that only have the current stream.
+function replaceLiveAnswer(text) {
+  const st = S.stream; return !!(st && st.wrap && replaceMessageAnswer(st.wrap, text));
+}
+function applyCandidateResolution(value, fid) {
+  const target = candidateMessageNode(value), status = reviewStatusFrom(value), truth = reviewTruthFrom(value);
+  const replacementWanted = !!(value && value.replaced === true);
+  let replacementApplied = false;
+  if (target) { discardDuplicateLiveCandidate(target, value); rememberCandidateIdentity(target, value); }
+  if (replacementWanted && candidateReplacementCommitted(value) && target) {
+    replacementApplied = replaceMessageAnswer(target, candidateReplacementText(value));
+    if (replacementApplied && target.dataset) target.dataset.candidateResolved = "true";
+  }
+  if (replacementWanted && !replacementApplied) scheduleConversationResync(fid);
+  // Never put Verified on bytes that an advertised replacement failed to reach,
+  // or on any answer the receipt itself says was not delivered.
+  const mayApplyBadge = status && (status !== "verified" || (value.delivered === true && value.durable === true && (!replacementWanted || replacementApplied)));
+  if (mayApplyBadge && target) {
+    setMessageReviewBadge(target, status, truth);
+    if (value.delivered === true && value.durable === true && target.dataset) target.dataset.candidateResolved = "true";
+  } else if (status && !target) scheduleConversationResync(fid);
+  else if (status === "verified" && !mayApplyBadge) scheduleConversationResync(fid);
+  return { targetFound: !!target, replacementApplied, badgeApplied: !!(mayApplyBadge && target) };
+}
+function applyFinalReviewStatus(value, fid) {
+  const status = reviewStatusFrom(value); if (!status) return false;
+  if (value && value.replaced === true) return applyCandidateResolution(value, fid).badgeApplied;
+  const target = candidateMessageNode(value);
+  // A previously applied candidate_resolved receipt is sufficient. Otherwise a
+  // Verified terminal must itself say the durable answer was delivered.
+  const mayVerify = status !== "verified" || (value.delivered === true && value.durable === true) || !!(target && target.dataset && target.dataset.candidateResolved === "true");
+  if (target && mayVerify) return setMessageReviewBadge(target, status, reviewTruthFrom(value));
+  scheduleConversationResync(fid); return false;
 }
 // A turn's request ticket, guarded by a generation.
 //
@@ -5273,7 +5857,7 @@ function turnDone(status, detail) {
   // A plan that was still "executing …" must reach a terminal state when the turn
   // ends, or the card reads "finished but not finished". Flip the live card to
   // completed/failed to match the turn outcome.
-  if (S.planReady && S.planStatus === "executing") renderPlanCard(S.planReady, status === "failed" ? "failed" : "completed");
+  if (S.planReady && S.planStatus === "executing") renderPlanCard(S.planReady, ["failed", "blocked_by_guardian"].includes(status) ? "failed" : "completed");
   if (S.planPending && status !== "failed") { S.planPending = false; if (!S.planReady) showPlanApproval(); }
 }
 // Legacy fallback card (only shown if a plan-mode turn produced no structured
@@ -5574,9 +6158,74 @@ function searchResultHttpUrl(value) {
   if (lower.startsWith("http://")) return "http://" + raw.slice(7);
   return "";
 }
+function delegateTaskChip(view) {
+  // Green is reserved for a child that declared completion and had it upheld;
+  // amber for every not-done-but-not-broken shape; red for failed.
+  const ts = view && view.task_status;
+  let cls = "neutral", key = null;
+  if (ts === "completed") { cls = "completed"; key = "step.delegate.status.completed"; }
+  else if (ts === "partial") { cls = "warning"; key = "step.delegate.status.partial"; }
+  else if (ts === "blocked") { cls = "warning"; key = "step.delegate.status.blocked"; }
+  else if (ts === "failed") { cls = "failed"; key = "step.delegate.status.failed"; }
+  else if (view && ["stopped", "cancelled"].includes(view.stop_reason)) { cls = "warning"; key = "step.delegate.status.stopped"; }
+  else if (view && ["pending", "running"].includes(view.status)) { key = "step.delegate.status.pending"; }
+  return el("span", "dlg-chip " + cls, key ? t(key) : publicText(ts || (view && view.status) || "?", 32));
+}
+function delegateResultRow(view, compact) {
+  const row = el("div", "dlg-child" + (compact ? " compact" : ""));
+  const head = el("div", "dlg-head");
+  head.appendChild(delegateTaskChip(view));
+  if (view.name || view.child_id) head.appendChild(el("span", "dlg-name", publicText(view.name || view.child_id, 120)));
+  if (view.turns != null && view.max_turns) head.appendChild(el("span", "dlg-pill", t("step.delegate.turns", view.turns, view.max_turns)));
+  const envName = view.environment && (view.environment.env_name || view.environment.python);
+  if (envName) head.appendChild(el("span", "dlg-pill", publicText(envName, 80)));
+  if (view.frame_id) { const ref = el("span", "dlg-pill dlg-frame-ref", shortRuntime(view.frame_id)); ref.title = publicText(view.frame_id, 96); head.appendChild(ref); }
+  row.appendChild(head);
+  if (view.summary) row.appendChild(el("div", "dlg-summary", publicText(view.summary, 600)));
+  if (view.error) row.appendChild(el("div", "dlg-error", publicText(view.error, 400)));
+  if (Array.isArray(view.artifacts) && view.artifacts.length) {
+    row.appendChild(el("div", "dlg-meta", t("step.delegate.artifacts") + ": " + publicList(view.artifacts, 20, 120).join(", ")));
+  }
+  if (Array.isArray(view.missing_artifacts) && view.missing_artifacts.length) {
+    row.appendChild(el("div", "dlg-error", t("step.delegate.missingArtifacts") + ": " + publicList(view.missing_artifacts, 10, 120).join(", ")));
+  }
+  if (Array.isArray(view.limitations) && view.limitations.length) {
+    const lim = el("div", "dlg-limits");
+    lim.appendChild(el("div", "dlg-meta", t("step.delegate.limitations") + ":"));
+    publicList(view.limitations, 8, 300).forEach(item => lim.appendChild(el("div", "dlg-limit", "· " + item)));
+    row.appendChild(lim);
+  }
+  return row;
+}
+function delegateStepBody(inp, out) {
+  // The default card is human-readable structure only; raw JSON lives behind
+  // an explicit collapsed reveal (same .s-out-tgl pattern as artifact steps).
+  const wrap = el("div", "dlg-card");
+  if (Array.isArray(out.children)) {
+    wrap.appendChild(el("div", "dlg-meta", t("step.delegate.children", out.children.length)));
+    out.children.forEach(child => wrap.appendChild(delegateResultRow(child && typeof child === "object" ? child : {}, true)));
+  } else {
+    wrap.appendChild(delegateResultRow(out, false));
+  }
+  const raw = typeof out.raw === "string" && out.raw ? out.raw : JSON.stringify(out, null, 2);
+  const details = el("div", "s-out");
+  const tgl = el("button", "s-out-tgl", t("step.delegate.showDetails"));
+  const json = el("div", "s-json"); json.textContent = raw; json.style.display = "none";
+  tgl.onclick = () => { const show = json.style.display === "none"; json.style.display = show ? "block" : "none"; tgl.textContent = show ? t("step.delegate.hideDetails") : t("step.delegate.showDetails"); };
+  details.appendChild(tgl); details.appendChild(json); wrap.appendChild(details);
+  return wrap;
+}
 function stepBody(step) {
   const k = step.kind, inp = step.input || {}, out = step.output || {};
   const box = el("div", "s-inner");
+  // The structured delegate card comes before the generic error dump: a
+  // max_turns envelope carries an error field beside its structured status
+  // and must still render as the truthful card, not a bare red blob.
+  if (k === "delegate" && out && typeof out === "object" && ("task_status" in out || Array.isArray(out.children))) {
+    if (inp.request) box.appendChild(clipPre(inp.request, "s-cmd"));
+    box.appendChild(delegateStepBody(inp, out));
+    return box;
+  }
   if (out.error) { box.appendChild(clipPre(out.error, "d-del")); return box; }
   if (k === "review") {
     const issues = Array.isArray(out.issues) ? out.issues : [];
@@ -5734,8 +6383,17 @@ function stepBody(step) {
 }
 function buildStepCard(step) {
   const card = el("div", "step step-" + (step.kind || "code"));
+  // A step forwarded from a delegated child carries its identity under
+  // input.delegation (set server-side): render it nested — indented, tagged
+  // with the child's name — so child activity never masquerades as the root's.
+  const dlg = step.input && step.input.delegation && typeof step.input.delegation === "object" ? step.input.delegation : null;
+  if (dlg) {
+    card.classList.add("step-child");
+    card.style.setProperty("--step-child-indent", Math.min(+dlg.depth || 1, 4) * 12 + "px");
+  }
   const h = el("div", "s-head");
   const ic = el("span", "s-ic"); h.appendChild(ic);
+  if (dlg) h.appendChild(el("span", "s-child-tag", publicText(dlg.child_name || shortRuntime(dlg.delegation_child_id), 60)));
   h.appendChild(el("span", "s-lbl", step.title || step.kind || t("step.card.defaultTitle")));
   const meta = el("span", "s-meta", ""); h.appendChild(meta);
   const chev = el("span", "s-chev"); chev.innerHTML = icon("chevron-down", 13); h.appendChild(chev);
@@ -5750,8 +6408,9 @@ function applyStepState(handle) {
   const status = step.status || "running";
   card.classList.toggle("running", status === "running");
   card.classList.toggle("err", status === "error");
+  card.classList.toggle("warn", status === "warning");
   if (status === "running") { ic.innerHTML = icon("loader", 14, "spin"); meta.textContent = step.kind === "review" ? "Reviewing" : ""; }
-  else { ic.innerHTML = icon(status === "error" ? "x" : stepIcon(step.kind), 14); meta.textContent = step.summary || (step.output && step.output.error ? t("step.status.failed") : ""); }
+  else { ic.innerHTML = icon(status === "error" ? "x" : (status === "warning" ? "alert-triangle" : stepIcon(step.kind)), 14); meta.textContent = step.summary || (step.output && step.output.error ? t("step.status.failed") : ""); }
   body.innerHTML = ""; body.appendChild(stepBody(step));
   if ((step.kind === "plan" || step.kind === "artifact") && status !== "running") card.classList.add("open");
   if (step.kind === "review") {
@@ -5843,6 +6502,18 @@ function renderPermissionCard(m) {
   card.appendChild(el("div", "perm-sub", t("perm.sub.approvalNeeded")));
   const act = permActionLine(m);
   if (act.text) card.appendChild(el("div", "perm-detail" + (act.mono ? " mono" : ""), act.text));
+  const fileReviewKeys = {
+    credential_path: "perm.review.credential_path",
+    dynamic_file_search: "perm.review.dynamic_file_search",
+    unreviewable_path: "perm.review.unreviewable_path",
+    verification_failed: "perm.review.verification_failed",
+  };
+  const fileReviewKey = fileReviewKeys[m.policy_review_kind];
+  if (fileReviewKey) {
+    card.appendChild(el("div", "perm-sub", t(fileReviewKey)));
+    if (m.resolved_file_path)
+      card.appendChild(el("div", "perm-detail mono", t("perm.lbl.resolvedPath", m.resolved_file_path)));
+  }
 
   let scope = defaultRememberScope(m);
   card.appendChild(el("div", "perm-lbl", t("perm.lbl.rememberScope")));
@@ -6467,6 +7138,7 @@ async function openConversation(fid, pid) {
   S.cells = []; S.kernels = []; S.liveCells = []; S._liveCell = null; S.dockArtifact = null; S.kernelFilter = null;
   destroyActionTimelineView(); S.actionTimeline = null; S.actionTimelineSelectedGroupId = null; S.actionTimelineSelectedBranchId = null;
   S.executionQueue = null; S.executionIdentity = null; S.recoveryState = null; S.recoveryActions = null; S.delegationState = null;
+  S.execSources = null;  // the executed-code surface is per-session state
   S.branchState = null; S.branchUndo = null; S.contextState = null; S.securityState = null;
   S.workbenchErrors = {}; S._timelineHistoryReq = (S._timelineHistoryReq || 0) + 1; S._timelineHistoryLoading = null;
   S._recoveryActionLoading = null; S._branchActionLoading = null; S._timelineRestoreFocusGroupId = null;
@@ -6478,6 +7150,10 @@ async function openConversation(fid, pid) {
   S.stepEls = {};  // fresh step registry so reopen-then-replay dedupes by step_id
   S.permCards = Object.create(null);  // fresh permission-card registry (null-proto; drop cards from the prior conversation)
   S.planReady = null; S.planStatus = null; S.planPending = false;  // fresh plan state per session
+  S.computeStatus = null;  // where the *previous* session ran says nothing about this one
+  { const badge = $("#compute-badge"); if (badge) badge.remove(); }
+  { const banner = $("#compute-lost"); if (banner) banner.remove(); }
+  refreshComputeStatus(fid);  // deliberately not awaited: a session must open even if this route does not exist
   S.annotations = []; closeAnnotDraft(); closeAnnotPop(); updateAnnotBadge();
   edacTeardown(); S._editing = null;  // stop any live editor autocomplete + clear edit state when switching sessions
   _molTeardown(); $("#dock-viewer").innerHTML = ""; renderDockTabs();
@@ -6559,6 +7235,7 @@ function renderStored(m, target) {
   const text = Array.isArray(m.content) ? m.content.map(b => (b && b.text) || "").join("") : (m.content || "");
   if (!text.trim()) return null;
   const w = el("div", "msg " + (m.role === "user" ? "user" : "assistant"));
+  rememberCandidateIdentity(w, m); w._messageText = text;
   if (m.role === "user") { const b = el("div", "bubble"); b.textContent = text; w.appendChild(b); renderMessageRefChips(w, m.artifact_refs); }
   else {
     const md = el("div", "md"); md.innerHTML = renderMd(text); w.appendChild(md);
@@ -6568,6 +7245,9 @@ function renderStored(m, target) {
     // successful turns ago, or one on a page the reader scrolled back to --
     // become the current state of the whole UI.
     if (m.failure && m.failure.request_id) w.appendChild(failureMeta(m.failure));
+    const review = m.review_status || (m.metadata && m.metadata.review_status);
+    const reviewStatus = review && (review.status || review);
+    if (reviewStatus) { setMessageReviewBadge(w, reviewStatus, review && review.user_truth); if (reviewStatus !== "candidate" && w.dataset) w.dataset.candidateResolved = "true"; }
   }
   // Stamped with its own time so a page of OLDER messages can be put where it
   // belongs. Activity steps are fetched whole while messages are paged, so the
@@ -6819,6 +7499,7 @@ function sessionMenu(anchor, fid) {
     { label: t("sessionPackage.export"), icon: "archive", onClick: () => exportSessionPackage(fid, frame) },
     { label: t("sessionMenu.downloadArtifacts"), icon: "files", onClick: () => downloadArtifactBundle(`${API}/frames/${encodeURIComponent(fid)}/artifacts.zip`, `${frame.name || frame.task_summary || "session"}-artifacts.zip`) },
     { label: t("sessionMenu.viewNotebook"), icon: "notebook", onClick: async () => { if (fid !== S.currentId) await openConversation(fid, frame.project_id); setActiveTab("notebook"); } },
+    { label: t("compute.menu.runLocation"), icon: "server", onClick: () => openRunLocationDialog(fid) },
     { sep: true },
     { label: t("sessionMenu.duplicate"), icon: "copy", onClick: () => duplicateSession(fid) },
     { label: t("sessionMenu.moveToFolder"), icon: "folder", onClick: () => moveToFolderAt(anchor, fid) },
@@ -7110,6 +7791,120 @@ async function cancelTurn() {
   catch (error) { hint(t("nb.action.failed", apiErrorText(error)), true); }
 }
 
+/* ---------- standard environment readiness ---------- */
+function sanitizeStandardProfileReadiness(value) {
+  if (!value || typeof value !== "object") return null;
+  const allowedStates = new Set(["ready", "needs_setup", "needs_repair", "unavailable"]);
+  const state = allowedStates.has(value.state) ? value.state : "unavailable";
+  const missingEnvironments = (Array.isArray(value.missing_environments) ? value.missing_environments : [])
+    .map(name => publicText(name, 160)).filter(Boolean);
+  const missingPackages = {};
+  const sourcePackages = value.missing_packages && typeof value.missing_packages === "object" ? value.missing_packages : {};
+  Object.keys(sourcePackages).sort().forEach(name => {
+    const environment = publicText(name, 160);
+    if (!environment) return;
+    missingPackages[environment] = (Array.isArray(sourcePackages[name]) ? sourcePackages[name] : [])
+      .map(packageName => publicText(packageName, 160)).filter(Boolean);
+  });
+  const sourceRemediation = value.remediation && typeof value.remediation === "object" ? value.remediation : null;
+  const commands = [];
+  if (sourceRemediation && sourceRemediation.requires_explicit_action === true) {
+    const candidates = Array.isArray(sourceRemediation.commands)
+      ? sourceRemediation.commands
+      : (sourceRemediation.command ? [sourceRemediation] : []);
+    candidates.forEach(candidate => {
+      if (!candidate || typeof candidate !== "object" || typeof candidate.command !== "string") return;
+      const command = candidate.command;
+      if (!command || command.length > 1000) return;
+      commands.push({ command, label: publicText(candidate.label, 120) });
+    });
+  }
+  return {
+    schema_version: Number(value.schema_version) || 0,
+    enabled: value.enabled === true,
+    ready: value.ready === true && state === "ready",
+    state,
+    reason: publicText(value.reason, 120),
+    requirements_digest: publicText(value.requirements_digest, 96),
+    missing_environments: missingEnvironments,
+    missing_packages: missingPackages,
+    remediation: sourceRemediation ? {
+      requires_explicit_action: sourceRemediation.requires_explicit_action === true,
+      commands,
+    } : null,
+  };
+}
+function environmentReadinessSummary(readiness) {
+  if (!readiness || readiness.state === "unavailable") return t("environment.readiness.bannerUnavailable");
+  const packageCount = Object.values(readiness.missing_packages || {}).reduce((count, names) => count + names.length, 0);
+  return t("environment.readiness.bannerMissing", readiness.missing_environments.length, packageCount);
+}
+function renderEnvironmentReadinessBanner() {
+  const readiness = S.standardProfileReadiness;
+  const visible = !!(readiness && readiness.enabled === true && readiness.ready !== true);
+  document.querySelectorAll(".environment-readiness-banner").forEach(banner => {
+    banner.classList.toggle("hidden", !visible);
+    if (!visible) return;
+    const title = banner.querySelector("[data-environment-readiness-title]");
+    const summary = banner.querySelector("[data-environment-readiness-summary]");
+    const action = banner.querySelector("[data-open-environment-readiness]");
+    if (title) title.textContent = t("environment.readiness.bannerTitle");
+    if (summary) summary.textContent = environmentReadinessSummary(readiness);
+    if (action) action.textContent = t("environment.readiness.openCompute");
+  });
+}
+async function refreshEnvironmentStatus() {
+  if (S._environmentStatusPromise) return S._environmentStatusPromise;
+  S._environmentStatusPromise = (async () => {
+    try {
+      const payload = await api("/environments/status");
+      S._environmentStatusRefreshFailed = false;
+      S.environmentStatus = payload && typeof payload === "object" ? payload : null;
+      S.standardProfileReadiness = sanitizeStandardProfileReadiness(
+        S.environmentStatus && S.environmentStatus.standard_profile_readiness
+      );
+    } catch (error) {
+      S._environmentStatusRefreshFailed = true;
+      // A server that predates the opt-in field behaves exactly as before. If
+      // this browser already knows the feature is enabled, however, losing the
+      // refresh cannot turn the last snapshot into a claim of readiness.
+      if (S.standardProfileReadiness && S.standardProfileReadiness.enabled === true) {
+        S.standardProfileReadiness = {
+          ...S.standardProfileReadiness,
+          ready: false,
+          state: "unavailable",
+          reason: "status_refresh_failed",
+        };
+      }
+    }
+    renderEnvironmentReadinessBanner();
+    return S.environmentStatus;
+  })();
+  try { return await S._environmentStatusPromise; }
+  finally { S._environmentStatusPromise = null; }
+}
+function isEnvironmentReadinessError(error) {
+  return !!(error && (
+    (error.status === 409 && error.code === "environment_not_ready")
+    || (error.status === 503 && error.code === "environment_readiness_unavailable")
+  ));
+}
+function handleEnvironmentReadinessTerminal(detail) {
+  const code = detail && detail.code;
+  if (!detail || detail.status !== "failed" || ![
+    "environment_not_ready",
+    "environment_readiness_unavailable",
+  ].includes(code)) return false;
+  // A control-only turn is allowed even while the scientific profile is
+  // incomplete.  If routing selected a Code Cell, the server rejects it before
+  // runtime side effects and this terminal event is the authoritative signal.
+  void refreshEnvironmentStatus().finally(() => {
+    openCust("compute");
+    hint(t("environment.readiness.sendBlocked"), true);
+  });
+  return true;
+}
+
 /* ---------- send ---------- */
 async function send(text, opts) {
   text = (text || "").trim(); opts = opts || {};
@@ -7127,17 +7922,23 @@ async function send(text, opts) {
   if (!text && !anns.length) return;              // nothing to send
   const planNow = S.planMode && !opts.execute;
   const exploreNow = S.exploreMode && !planNow && !opts.execute;
+  // Readiness is visible before send, but admission belongs to the first Code
+  // Cell. Keeping ordinary sends routable preserves native-tool and structured-
+  // finalization turns that never need a kernel.
   // Explicit skill invocation: a "/skillname" token (from the / autocomplete or
   // the Skills settings tab) is turned into a hard directive so the skill is
   // actually loaded — left as plain text the model routinely skips
   // host.load_skill and the skill never runs.
   let skillDirective = "";
-  if (!planNow) {
+  const skillCandidates = [];
+  if (!planNow) text.replace(/(^|\s)\/([A-Za-z0-9][\w:-]*)/g, (m, _p, nm) => { if (!skillCandidates.includes(nm)) skillCandidates.push(nm); return m; });
+  // The full catalog includes lazy collection members, so fetching it can be
+  // noticeable on a cold send. Ordinary prose has nothing to resolve here.
+  if (skillCandidates.length) {
     try {
       const cat = await loadSkillsCatalog();
       const names = new Set((cat || []).map(s => String(s.name).toLowerCase()));
-      const hits = [];
-      text.replace(/(^|\s)\/([A-Za-z0-9][\w:-]*)/g, (m, _p, nm) => { if (names.has(nm.toLowerCase()) && !hits.includes(nm)) hits.push(nm); return m; });
+      const hits = skillCandidates.filter(nm => names.has(nm.toLowerCase()));
       if (hits.length) skillDirective = "\n\n" + hits.map(n => t("skill.invokeDirective", n)).join("\n");
     } catch {}
   }
@@ -7285,6 +8086,41 @@ async function send(text, opts) {
       if (!reloaded) setLocalAnnotationStatus(annIds, refused ? "open" : "pending");
       refreshAllStages(); updateAnnotBadge();
     }
+    // The preflight is advisory UX; the server remains authoritative. A
+    // readiness transition between GET and POST is surfaced by these exact
+    // contracts. Refresh the durable banner/card and give the rejected text
+    // back instead of leaving an optimistic message that never ran.
+    if (isEnvironmentReadinessError(e)) {
+      await refreshEnvironmentStatus();
+      // The POST itself proved that readiness admission is enabled. If the
+      // requested refresh also failed, retain that authoritative fact as an
+      // unavailable snapshot so the persistent banner cannot disappear and
+      // imply readiness. A successful refresh (including an explicit flag-off
+      // payload) remains authoritative and is not overwritten here.
+      if (S._environmentStatusRefreshFailed) {
+        S.standardProfileReadiness = {
+          schema_version: 1,
+          enabled: true,
+          ready: false,
+          state: "unavailable",
+          reason: "status_refresh_failed",
+          requirements_digest: null,
+          missing_environments: [],
+          missing_packages: {},
+          remediation: null,
+        };
+        renderEnvironmentReadinessBanner();
+      }
+      const composer = $("#composer");
+      if (composer && !composer.value.trim()) composer.value = text;
+      if (composer) { grow(); renderComposerRefChips(); }
+      w.remove();
+      if (ownsTurnTicket(turnTicket)) turnDone("failed");
+      openCust("compute");
+      hint(t("environment.readiness.sendBlocked"), true);
+      loadSessions();
+      return;
+    }
     // The two 409s a send can end on that the user cannot resolve from
     // anywhere else in the app. Both say "choose one to continue" and both are
     // answered by the same rebind: the binding is in no PATCH allowlist and
@@ -7339,6 +8175,151 @@ function annotAttachment(anns) {
   anns.forEach(an => { const r = el("div", "annot-attach-row"); r.appendChild(el("span", "annot-attach-pin", String(an.number))); r.appendChild(el("span", "annot-attach-file", (an.artifact_name || "artifact"))); r.appendChild(el("span", "annot-attach-body", "· " + (an.body || ""))); list.appendChild(r); });
   box.appendChild(list);
   return box;
+}
+
+/* ---------- where a session runs (M3b-6) ----------
+   Three things the user cannot infer from a spinner:
+   WHERE the kernel is, WHICH of the four readiness conditions is still
+   outstanding, and WHETHER the kernel's memory was lost and quietly
+   replaced. The last one is not a nicety -- results produced after a
+   recovery look exactly like results from the session that was lost, so
+   INV-11 makes saying so mandatory. */
+const COMPUTE_BLOCKED_LABEL = {
+  allocation: "compute.blocked.allocation",
+  workspace: "compute.blocked.workspace",
+  worker: "compute.blocked.worker",
+  kernel: "compute.blocked.kernel",
+};
+async function loadComputeStatus(fid) {
+  if (!fid) return null;
+  try { return await api(`/sessions/${encodeURIComponent(fid)}/compute`); }
+  catch { return null; }   // a daemon without the feature is not an error state
+}
+async function refreshComputeStatus(fid) {
+  const status = await loadComputeStatus(fid);
+  if (!fid || fid !== S.currentId) return status;   // session switched mid-flight
+  S.computeStatus = status;
+  renderComputeBadge();
+  renderComputeLostBanner();
+  return status;
+}
+function renderComputeBadge() {
+  const host = $(".conv-head-actions");
+  if (!host) return;
+  let badge = $("#compute-badge");
+  const status = S.computeStatus;
+  // A local session gets no badge at all. A chip reading "local" on every
+  // session in an install that has no cluster is pure noise.
+  if (!status || status.location !== "cluster") { if (badge) badge.remove(); return; }
+  if (!badge) {
+    badge = el("button", "compute-badge"); badge.id = "compute-badge";
+    badge.onclick = () => openRunLocationDialog(S.currentId);
+    host.insertBefore(badge, host.firstChild);
+  }
+  const readiness = status.readiness || {};
+  const allocation = status.allocation || {};
+  const workload = status.workload || {};
+  badge.innerHTML = "";
+  badge.appendChild(iconEl("server", 13));
+  const ready = !!readiness.ready;
+  const blockedKey = COMPUTE_BLOCKED_LABEL[readiness.blocked_on];
+  const label = ready
+    ? `${workload.profile || t("compute.badge.ready")}`
+    : (blockedKey ? t(blockedKey) : (allocation.phase || workload.phase || "").toLowerCase());
+  badge.appendChild(el("span", "cb-label", label));
+  badge.className = "compute-badge" + (ready ? " ready" : " waiting");
+  // The phase is the tooltip rather than the label: an allocation id and a
+  // phase name are what a support conversation needs, and neither belongs
+  // in a chip somebody reads fifty times a day.
+  badge.title = [
+    workload.profile ? `profile: ${workload.profile}` : "",
+    allocation.allocation_id ? `allocation: ${allocation.allocation_id}` : "",
+    allocation.phase ? `phase: ${allocation.phase}` : "",
+    workload.reason ? `reason: ${workload.reason}` : "",
+  ].filter(Boolean).join("\n");
+}
+function renderComputeLostBanner() {
+  const status = S.computeStatus || {};
+  const epochs = status.state_lost_epochs || [];
+  const seen = S._computeLostSeen || (S._computeLostSeen = {});
+  const key = S.currentId + ":" + epochs.join(",");
+  let banner = $("#compute-lost");
+  if (!epochs.length || seen[key]) { if (banner) banner.remove(); return; }
+  if (!banner) {
+    banner = el("div", "compute-lost"); banner.id = "compute-lost";
+    const messages = $("#messages");
+    if (!messages) return;
+    messages.parentNode.insertBefore(banner, messages);
+  }
+  banner.innerHTML = "";
+  banner.appendChild(iconEl("alert-triangle", 15));
+  const text = el("div", "cl-text");
+  text.appendChild(el("strong", null, t("compute.lost.title")));
+  text.appendChild(el("div", "cl-body", t("compute.lost.body")));
+  banner.appendChild(text);
+  const dismiss = el("button", "cl-dismiss", t("compute.lost.dismiss"));
+  // Dismissal is per (session, set of lost epochs): a *further* loss
+  // raises it again rather than being swallowed by an earlier "got it".
+  dismiss.onclick = () => { seen[key] = true; banner.remove(); };
+  banner.appendChild(dismiss);
+}
+async function openRunLocationDialog(fid) {
+  const target = fid || S.currentId;
+  if (!target) return;
+  let status = null, catalog = { profiles: [] };
+  try {
+    [status, catalog] = await Promise.all([
+      loadComputeStatus(target),
+      api("/orchestration/profiles").catch(() => ({ profiles: [] })),
+    ]);
+  } catch (error) { hint(apiErrorText(error), true); return; }
+
+  const wrap = el("div", "run-location");
+  const current = (status && status.location) || "local";
+  const choose = async (profile) => {
+    try {
+      if (profile === null) await api(`/sessions/${encodeURIComponent(target)}/compute/release`, { method: "POST", body: "{}" });
+      else await api(`/sessions/${encodeURIComponent(target)}/compute`, { method: "POST", body: JSON.stringify({ profile }) });
+      closeModalEl($("#modal"));
+      await refreshComputeStatus(target);
+    } catch (error) {
+      // The 409 that means "this daemon has no listener" is the one a user
+      // will actually hit, and its body already explains itself.
+      hint(apiErrorText(error), true);
+    }
+  };
+
+  const local = el("button", "rl-option" + (current === "local" ? " current" : ""));
+  local.appendChild(el("div", "rl-name", t("compute.location.local")));
+  local.appendChild(el("div", "rl-hint", t("compute.location.localHint")));
+  local.onclick = () => (current === "local" ? closeModalEl($("#modal")) : choose(null));
+  wrap.appendChild(local);
+
+  const profiles = (catalog && catalog.profiles) || [];
+  if (!profiles.length) wrap.appendChild(el("div", "rl-empty", t("compute.dialog.notConfigured")));
+  profiles.forEach(profile => {
+    const option = el("button", "rl-option" + (current === "cluster" && status.workload && status.workload.profile === profile.name ? " current" : ""));
+    option.appendChild(el("div", "rl-name", profile.name));
+    const bits = [
+      `${profile.cpus} CPU`,
+      profile.gpus ? `${profile.gpus} GPU` : "",
+      `${Math.round((profile.memory_mb || 0) / 1024)} GiB`,
+      `${Math.round((profile.walltime_s || 0) / 3600)} h`,
+    ].filter(Boolean).join(" · ");
+    option.appendChild(el("div", "rl-hint", bits));
+    option.onclick = () => choose(profile.name);
+    wrap.appendChild(option);
+  });
+
+  if (current === "cluster") {
+    const release = el("button", "rl-release", t("compute.dialog.release"));
+    release.onclick = () => choose(null);
+    wrap.appendChild(release);
+  }
+  $("#modal-title").textContent = t("compute.dialog.title");
+  const download = $("#modal-download"); if (download) download.style.display = "none";
+  const body = $("#modal-body"); body.innerHTML = ""; body.appendChild(wrap);
+  openModalEl($("#modal"));
 }
 
 /* ---------- api-key banner (C3) ---------- */
@@ -7679,8 +8660,8 @@ function renderArtifactDescriptor(body, a, descriptor) {
   const content = el("div", "renderer-content"); shell.appendChild(content); body.appendChild(shell);
   const url = artUrl(a); const nm = String(a.filename || "").toLowerCase();
   if (rendererId === "image") renderAnnotatableImage(content, a, url);
-  else if (rendererId === "pdf") { const frame = el("iframe"); frame.src = url; content.appendChild(frame); }
-  else if (rendererId === "html-preview") { const frame = el("iframe"); frame.setAttribute("sandbox", "allow-scripts allow-forms"); frame.src = (S.sandboxOrigin || "") + `/preview/${encodeURIComponent(a.id)}`; content.appendChild(frame); }
+  else if (rendererId === "pdf") { const frame = el("iframe"); frame.dataset.currentPage = "1"; frame.src = url + "#page=1"; content.appendChild(frame); if (artifactWorkbenchOn()) renderLocatorComments(content, a, "pdf", frame); }
+  else if (rendererId === "html-preview") { const frame = el("iframe"); frame.setAttribute("sandbox", ""); frame.src = (S.sandboxOrigin || "") + `/preview/${encodeURIComponent(a.id)}`; content.appendChild(frame); const note = el("p", "muted renderer-noscript", t("viewer.renderer.noscript")); content.appendChild(note); if (artifactWorkbenchOn()) renderLocatorComments(content, a, "html"); }
   else if (rendererId === "molecule-3d") molecule(content, url, nm);
   else if (rendererId === "chemistry-2d") renderChemistry2D(content, a, url);
   else if (rendererId === "genome-track") renderGenomeTrack(content, a, url);
@@ -7725,7 +8706,11 @@ function renderStructuredText(container, a, text) {
   if (!rows || !rows.length) { const pre = el("pre", "renderer-source"); pre.textContent = text.slice(0, 300000); container.appendChild(pre); return; }
   renderSheet(container, rows);
 }
+function artifactWorkbenchOn() {
+  return !!(S.artifactWorkbench || (_kc && _kc.st && _kc.st.artifact_workbench));
+}
 function renderTableArtifact(container, a, url) {
+  if (artifactWorkbenchOn()) return renderWorkbenchTable(container, a);
   fetchArtifactText(url).then(text => {
     if (!container.isConnected) return;
     if (looksBinary(text)) return renderDownloadArtifact(container, a, url);
@@ -7733,6 +8718,51 @@ function renderTableArtifact(container, a, url) {
     if (rows && rows.length) renderSheet(container, rows);
     else { const pre = el("pre", "renderer-source"); pre.textContent = text.slice(0, 300000); container.appendChild(pre); }
   }).catch(() => rendererFailure(container, a, url));
+}
+function renderWorkbenchTable(container, a) {
+  const state = { sort: "", dir: "asc", filters: {}, offset: 0, limit: 50 };
+  const chrome = el("div", "wb-table");
+  const controls = el("div", "wb-table-controls");
+  const filter = el("input", "wb-filter"); filter.placeholder = t("wb.table.filter");
+  const prev = el("button", "outline-btn small", t("wb.table.prev"));
+  const next = el("button", "outline-btn small", t("wb.table.next"));
+  const meta = el("div", "wb-table-meta");
+  controls.appendChild(filter); controls.appendChild(prev); controls.appendChild(next); chrome.appendChild(controls); chrome.appendChild(meta);
+  const hold = el("div", "wb-table-hold"); chrome.appendChild(hold); container.appendChild(chrome);
+  const load = async () => {
+    const query = new URLSearchParams({ sort: state.sort, dir: state.dir, offset: String(state.offset), limit: String(state.limit) });
+    Object.entries(state.filters).forEach(([key, value]) => { if (value) query.set("q_" + key, value); });
+    let payload;
+    try { payload = await api(`/artifacts/${encodeURIComponent(a.id)}/table?${query}`); }
+    catch (error) { hold.textContent = apiErrorText(error); return; }
+    if (!container.isConnected) return;
+    meta.textContent = t("wb.table.meta", payload.total_rows, payload.offset + 1, Math.min(payload.offset + payload.rows.length, payload.total_rows));
+    hold.innerHTML = "";
+    const table = el("table", "sheet"); const head = el("tr");
+    (payload.columns || []).forEach(name => {
+      const th = el("th", payload.sorted_by === name ? "wb-sorted" : "", name);
+      th.onclick = () => { state.sort = name; state.dir = payload.sorted_by === name && state.dir === "asc" ? "desc" : "asc"; state.offset = 0; load(); };
+      head.appendChild(th);
+    });
+    table.appendChild(head);
+    (payload.rows || []).forEach(row => {
+      const tr = el("tr"); (payload.columns || []).forEach((_, index) => tr.appendChild(el("td", null, String(row[index] ?? "")))); table.appendChild(tr);
+    });
+    hold.appendChild(table);
+    prev.disabled = payload.offset <= 0;
+    next.disabled = payload.offset + payload.rows.length >= payload.total_rows;
+  };
+  filter.onchange = () => { state.filters = payloadFilters(filter.value, a); state.offset = 0; load(); };
+  prev.onclick = () => { state.offset = Math.max(0, state.offset - state.limit); load(); };
+  next.onclick = () => { state.offset += state.limit; load(); };
+  load();
+}
+function payloadFilters(text, a) {
+  const value = String(text || "").trim();
+  if (!value) return {};
+  const named = value.match(/^([^:]+):(.*)$/);
+  if (named) return { [named[1].trim()]: named[2].trim() };
+  return { [((a && a.filename) || "col").replace(/\.[^.]+$/, "")]: value };
 }
 // The true shape of a parsed table: rows, and the union of every row's keys.
 // Not `rows[0]`'s keys, which is what decides the drawn columns -- records
@@ -7877,6 +8907,20 @@ function molecule2dSvg(model) {
   return svg;
 }
 function renderChemistry2D(container, a, url) {
+  if (artifactWorkbenchOn()) {
+    const bar = el("div", "wb-ketcher-bar");
+    const open = el("button", "solid-btn small", t("wb.ketcher.edit"));
+    open.onclick = () => {
+      $("#modal-title").textContent = t("ketcher.modalTitle");
+      $("#modal-download").style.display = "none";
+      const body = $("#modal-body"); body.innerHTML = "";
+      const frame = el("iframe");
+      frame.src = (S.sandboxOrigin || "") + "/ketcher?artifact_id=" + encodeURIComponent(a.id);
+      frame.setAttribute("allow", "clipboard-read; clipboard-write");
+      body.appendChild(frame); openModalEl($("#modal"));
+    };
+    bar.appendChild(open); container.appendChild(bar);
+  }
   fetchArtifactText(url).then(text => {
     if (!container.isConnected) return;
     const runtime = scientificRenderers(); const model = runtime && runtime.parseMolfile(text); const drawing = molecule2dSvg(model);
@@ -8499,6 +9543,30 @@ async function exportMetadata(a) {
     setTimeout(() => URL.revokeObjectURL(url), 2000); hint(t("artifact.metadataExported"));
   } catch (e) { hint(t("toast.exportFailed", apiErrorText(e)), true); }
 }
+async function renderArtifactVersionDiff(panel, a, fromVersion, toVersion, fromOrdinal, toOrdinal) {
+  const request = panel._diffRequest = (panel._diffRequest || 0) + 1;
+  panel.classList.remove("hidden"); panel.innerHTML = "";
+  panel.appendChild(el("div", "ver-diff-title", t("versions.diff.title", fromOrdinal, toOrdinal)));
+  const status = el("div", "dock-empty", t("versions.diff.loading")); panel.appendChild(status);
+  try {
+    const query = `from=${encodeURIComponent(fromVersion)}&to=${encodeURIComponent(toVersion)}`;
+    const payload = await api(`/artifacts/${encodeURIComponent(a.id)}/diff?${query}`);
+    if (panel._diffRequest !== request) return;
+    status.remove();
+    const raw = String((payload && payload.diff) || "");
+    if (!raw || (payload && payload.changed === false)) {
+      panel.appendChild(el("div", "dock-empty", t("versions.diff.empty"))); return;
+    }
+    const limit = 200000, pre = el("pre", "ver-diff-body");
+    // The unified diff is untrusted Artifact content. textContent keeps file
+    // bytes inert even when they contain HTML/script syntax.
+    pre.textContent = raw.slice(0, limit); panel.appendChild(pre);
+    if (raw.length > limit) panel.appendChild(el("div", "ver-diff-note", t("versions.diff.truncated", limit)));
+  } catch (error) {
+    if (panel._diffRequest !== request) return;
+    status.textContent = t("versions.diff.err", apiErrorText(error)); status.classList.add("error");
+  }
+}
 async function showVersions(a) {
   S._modalMode = "versions:" + a.id;
   $("#modal-title").textContent = t("versions.modal.title", (a.filename || ""));
@@ -8508,7 +9576,7 @@ async function showVersions(a) {
   const render = async () => {
     let d; try { d = await api(`/artifacts/${a.id}/versions`); } catch (e) { body.textContent = t("versions.load.err", e.message); return; }
     const vs = (d && d.versions) || []; body.innerHTML = "";
-    const wrap = el("div", "ver-list");
+    const wrap = el("div", "ver-list"), diffPanel = el("section", "ver-diff hidden");
     if (!vs.length) { wrap.appendChild(el("div", "dock-empty", t("versions.empty"))); }
     vs.forEach(v => {
       const row = el("div", "ver-row" + (v.is_latest ? " current" : ""));
@@ -8518,6 +9586,13 @@ async function showVersions(a) {
       row.appendChild(info);
       const acts = el("div", "ver-acts");
       const view = el("a", "outline-btn small", t("common.view")); view.href = `${API}/artifacts/${v.version_id}`; view.target = "_blank"; acts.appendChild(view);
+      const previous = isTextEditable(a) ? vs.find(candidate => Number(candidate.ordinal) === Number(v.ordinal) - 1) : null;
+      if (previous) {
+        const compare = el("button", "outline-btn small", t("versions.diff", previous.ordinal, v.ordinal));
+        compare.dataset.action = "compare-artifact-versions";
+        compare.onclick = () => renderArtifactVersionDiff(diffPanel, a, previous.version_id, v.version_id, previous.ordinal, v.ordinal);
+        acts.appendChild(compare);
+      }
       if (!v.is_latest) { const rb = el("button", "solid-btn small", t("versions.restore")); rb.onclick = async () => { rb.disabled = true; rb.textContent = t("versions.restoring"); try { const restored = await api(`/artifacts/${a.id}/versions/${v.version_id}/restore`, { method: "POST" }); syncArtifactVersion((restored && restored.artifact) || { id: a.id, version_id: v.version_id }, true); hint(t("versions.restored", v.ordinal)); (S._artBust = S._artBust || {})[a.id] = Date.now(); if (S.currentId) loadArtifacts(S.currentId); if (S.dockArtifact && S.dockArtifact.id === a.id) { if (S.provMode) showProvenance(S.dockArtifact); else renderViewer(); } render(); } catch (e) { rb.disabled = false; rb.textContent = t("versions.restore"); hint(t("versions.restore.err", apiErrorText(e)), true); } }; acts.appendChild(rb); }
       row.appendChild(acts); wrap.appendChild(row);
       // Where this version's data came from, when it came from anywhere. The
@@ -8528,7 +9603,7 @@ async function showVersions(a) {
       // client renders what it is given and derives nothing.
       if (v.retrieval_source) wrap.appendChild(retrievalSourcePanel(v.retrieval_source));
     });
-    body.appendChild(wrap);
+    body.appendChild(wrap); body.appendChild(diffPanel);
   };
   render();
 }
@@ -8887,6 +9962,7 @@ function _paintKernel(els, st) {
   }
   const env = st.env || {};
   if (title) title.textContent = kernelLabel(kernelIdFromEnv(env)) + " kernel · " + t("nb.kernel.shared")
+    + (st.generation_id ? " · " + t("nb.owner.generation", shortRuntime(st.generation_id)) : "")
     + (env.pending ? t("nb.kernel.pendingSwitch", env.pending) : "");
   if (badge && badge.root && badge.label) {
     const mode = runtimeSummary().status;
@@ -8930,6 +10006,7 @@ async function refreshKernelState(els, _b, _c) {
   const previousRuntimeKey = _kc.st && [_kc.st.state, _kc.st.alive, _kc.st.turn_running, _kc.st.generation_id, _kc.st.generation, _kc.st.view_only, _kc.st.trust_state].join(":");
   if (_kc.id !== sid) { _kc.id = sid; _kc.envs = null; }
   _kc.st = st; _kc.stAt = Date.now();
+  S.artifactWorkbench = !!st.artifact_workbench;
   _paintKernel(els, st);  // els may be stale (a newer render replaced it); harmless — the next render repaints from cache
   // The first render happens before kernel status is known and therefore uses
   // the passive strip. If this daemon explicitly enables the developer REPL,
@@ -9047,7 +10124,110 @@ const NOTEBOOK_EXPORTS = [
   // for pasting it into an issue or a methods section, with both languages in
   // execution order because the interleaving is the record.
   { language: "markdown", key: "prov.exec.downloadMarkdown", suffix: "md" },
+  // The whole execution hierarchy as source files: root + every delegated
+  // child frame recursively, failed cells included and marked, with a
+  // manifest. A different route from the notebook export — `path` overrides
+  // the language-based URL builder.
+  { path: "/execution-sources/export", key: "prov.exec.downloadSources", suffix: "sources.zip" },
 ];
+function notebookExportHref(frameId, option) {
+  const base = `${API}/frames/${encodeURIComponent(frameId)}`;
+  return option.path ? `${base}${option.path}` : `${base}/notebook/export?language=${option.language}`;
+}
+
+/* ---------- Executed code (execution history: root + delegated frames) ----
+   A read-only surface over /frames/{fid}/execution-sources (the frame tree +
+   cell metadata) and each frame's own /execution-log (the code text). It is
+   the execution HISTORY — failures included — and deliberately distinct from
+   Artifacts/deliverables; the note in the header says so in both languages.
+   The navigator's counts come from execution-sources (the raw history,
+   protocol-only completion cells included), while the per-frame body renders
+   /execution-log (the Notebook's curated view, which hides those), so a
+   frame's count may exceed its rendered cells — intentional, documented on
+   both routes in docs/webapp-api.md. */
+function execSourcesState() {
+  if (!S.execSources) S.execSources = { open: false, data: null, selected: null, cells: {}, loading: false, error: "", request: 0 };
+  return S.execSources;
+}
+function toggleExecutedCode() {
+  const st = execSourcesState();
+  st.open = !st.open;
+  if (st.open && !st.data && !st.loading) loadExecutionSources();
+  renderNotebook();
+}
+async function loadExecutionSources() {
+  const id = S.currentId; if (!id) return;
+  const st = execSourcesState();
+  const request = st.request = (st.request || 0) + 1;
+  st.loading = true; st.error = "";
+  try {
+    const d = await api(`/frames/${encodeURIComponent(id)}/execution-sources`);
+    if (id !== S.currentId || S.execSources !== st || request !== st.request) return;
+    st.data = d;
+    if (!st.selected) st.selected = (d && d.frames && d.frames[0] && d.frames[0].frame_id) || id;
+  } catch (e) {
+    if (id === S.currentId && S.execSources === st) st.error = publicText(e && e.message, 240);
+  } finally {
+    if (id === S.currentId && S.execSources === st) { st.loading = false; renderNotebook(); }
+  }
+  if (S.execSources === st && st.data && st.selected) selectExecFrame(st.selected);
+}
+async function selectExecFrame(frameId) {
+  const st = execSourcesState();
+  st.selected = frameId;
+  renderNotebook();
+  if (st.cells[frameId]) return;
+  // Guarded like loadExecutionSources: a stale response (frame re-selected,
+  // session switched) may still fill its own cache slot, but only the latest
+  // request owns the shared error banner.
+  const request = st.cellRequest = (st.cellRequest || 0) + 1;
+  try {
+    const d = await api(`/frames/${encodeURIComponent(frameId)}/execution-log`);
+    st.cells[frameId] = (d && d.entries) || [];
+    if (S.execSources === st && request === st.cellRequest) st.error = "";
+  } catch (e) {
+    // Do not cache the failure: an empty slot lets the next click retry
+    // instead of pinning an empty cell list until the session reopens.
+    if (S.execSources === st && request === st.cellRequest)
+      st.error = t("nb.exec.loadFailed", publicText(e && e.message, 200));
+  }
+  if (S.execSources === st && st.open) renderNotebook();
+}
+function buildExecutedCodeView(st) {
+  const wrap = el("div", "nb-exec");
+  const head = el("div", "nb-exec-head");
+  head.appendChild(el("span", "nb-exec-title", t("nb.exec.title")));
+  head.appendChild(el("span", "nb-exec-note", t("nb.exec.note")));
+  wrap.appendChild(head);
+  if (st.error) wrap.appendChild(el("div", "timeline-error", publicText(st.error, 240)));
+  if (!st.data) {
+    if (!st.error) wrap.appendChild(el("div", "dock-empty", t("common.loading")));
+    return wrap;
+  }
+  const frames = (st.data.frames || []);
+  const selected = st.selected || (frames[0] && frames[0].frame_id) || null;
+  const nav = el("div", "nb-exec-frames");
+  frames.forEach(f => {
+    const isRoot = !f.parent_id;
+    const btn = el("button", "nb-exec-frame" + (selected === f.frame_id ? " on" : ""));
+    btn.setAttribute("data-frame", publicText(f.frame_id, 96));
+    btn.style.setProperty("--exec-indent", (Math.min(Math.max(Number(f.depth) || 0, 0), 8) * 14) + "px");
+    btn.appendChild(el("span", "nb-exec-frame-name", isRoot ? t("nb.exec.root") : (publicText(f.name, 80) || publicText(f.frame_id, 24))));
+    const counts = f.counts || {};
+    btn.appendChild(el("span", "nb-exec-frame-count", t("nb.exec.cellCount", Number(counts.cells) || 0)));
+    if (Number(counts.error) > 0) btn.appendChild(el("span", "nb-exec-frame-fail", t("nb.exec.failCount", Number(counts.error))));
+    btn.onclick = () => selectExecFrame(f.frame_id);
+    nav.appendChild(btn);
+  });
+  wrap.appendChild(nav);
+  const body = el("div", "nb-exec-cells");
+  const cells = selected != null ? st.cells[selected] : null;
+  if (!cells) body.appendChild(el("div", "dock-empty", t("common.loading")));
+  else if (!cells.length) body.appendChild(el("div", "dock-empty", t("nb.exec.empty")));
+  else cells.forEach(e => body.appendChild(cellNode(e)));
+  wrap.appendChild(body);
+  return wrap;
+}
 function notebookExportLink(frameId) {
   const wrap = el("div", "prov-dl");
   // The default action stays exactly what it was, so the common path is one
@@ -9056,7 +10236,7 @@ function notebookExportLink(frameId) {
   const dl = el("a", "prov-dlbtn");
   dl.appendChild(iconEl("download", 14));
   dl.appendChild(el("span", null, t(primary.key)));
-  dl.href = `${API}/frames/${encodeURIComponent(frameId)}/notebook/export?language=${primary.language}`;
+  dl.href = notebookExportHref(frameId, primary);
   dl.setAttribute("download", `${frameId}.${primary.suffix}`);
   wrap.appendChild(dl);
 
@@ -9068,7 +10248,7 @@ function notebookExportLink(frameId) {
   NOTEBOOK_EXPORTS.slice(1).forEach(option => {
     const item = el("a", "prov-dlitem");
     item.appendChild(el("span", null, t(option.key)));
-    item.href = `${API}/frames/${encodeURIComponent(frameId)}/notebook/export?language=${option.language}`;
+    item.href = notebookExportHref(frameId, option);
     item.setAttribute("download", `${frameId}.${option.suffix}`);
     // A download navigates; the menu should not stay open behind it.
     item.onclick = () => { menu.classList.add("hidden"); toggle.setAttribute("aria-expanded", "false"); };
@@ -9185,11 +10365,35 @@ function renderNotebook() {
   const badge = el("div", "nb-live-badge " + badgeMode); badge.appendChild(el("span", "ld"));
   const badgeLabel = el("span", null, t("runtime.status." + badgeMode)); badge.appendChild(badgeLabel); badge.appendChild(iconEl("chevron-down", 14)); chips.appendChild(badge);
   if (S.currentId) chips.appendChild(notebookExportLink(S.currentId));
+  if (S.currentId) {
+    const execToggle = el("button", "kchip nb-exec-toggle" + (S.execSources && S.execSources.open ? " on" : ""));
+    execToggle.appendChild(iconEl("terminal", 13));
+    execToggle.appendChild(el("span", null, t("nb.exec.toggle")));
+    execToggle.onclick = toggleExecutedCode;
+    chips.appendChild(execToggle);
+  }
   const badgeEls = { root: badge, label: badgeLabel };
   nb.appendChild(chips);
+  // The Executed-code surface replaces the Notebook body while open: it is a
+  // read-only view of execution HISTORY (root + delegated child frames), not
+  // of the live session's deliverables.
+  if (S.execSources && S.execSources.open) {
+    nb.appendChild(buildExecutedCodeView(S.execSources));
+    return;
+  }
   let shown = entries; if (S.kernelFilter) shown = entries.filter(e => (e.kernel_id || "python") === S.kernelFilter);
   if (!shown.length) nb.appendChild(el("div", "dock-empty", t("nb.empty")));
   else shown.forEach(e => nb.appendChild(cellNode(e)));
+  const owners = el("div", "nb-owners");
+  ["agent", "user_repl", "repair", "review_scratch"].forEach(kind => {
+    const chip = el("span", "nb-owner-chip");
+    const active = identityForOwner(S.executionQueue, kind);
+    if (active) chip.classList.add("active");
+    chip.textContent = t("nb.owner." + kind);
+    chip.title = active && active.execution_id ? active.execution_id : kind;
+    owners.appendChild(chip);
+  });
+  nb.appendChild(owners);
   // Read-only Notebook by default: the interactive REPL (input, env selector,
   // stop/start/restart/interrupt) is built ONLY when the server explicitly
   // enables it (developer flag repl_enabled). Otherwise render a passive,
@@ -9585,22 +10789,112 @@ async function renderProvMessages(body) {
 function renderProvReview(body, a, lin) {
   if (!lin) { body.appendChild(el("div", "dock-empty", t("common.loading"))); return; }
   const inter = lin.interactions || []; const cell = inter.find(i => i.kind === "cell");
+  const producer = lin.producer && typeof lin.producer === "object" ? lin.producer : null;
   const mapped = lin.dependency_mappings && lin.dependency_mappings.inputs;
-  const inputs = Array.isArray(mapped) ? mapped : (cell && cell.files_read) || [];
-  if (!cell && !inputs.length) { body.appendChild(el("div", "dock-empty", t("prov.review.noLineage"))); return; }
+  const inputs = Array.isArray(mapped) ? mapped : [];
+  const cellInputs = (cell && Array.isArray(cell.files_read)) ? cell.files_read : [];
+  const captures = Array.isArray(lin.capture_observations) ? lin.capture_observations : [];
+  if (!cell && !inputs.length && !captures.length && !producer) { body.appendChild(el("div", "dock-empty", t("prov.review.noLineage"))); return; }
   const card = el("div", "prov-card");
   if (cell) {
     card.appendChild(el("div", "prov-h", t("prov.review.producedBy", (cell.cell_index != null ? cell.cell_index : "?"))));
     card.appendChild(el("div", "prov-meta", (cell.language || "python") + " · " + (cell.exit_status || cell.status || "ok") + (cell.kernel_id ? (" · " + cell.kernel_id) : "")));
     if ((cell.files_written || []).length) card.appendChild(provRow("wrote", cell.files_written));
-    if (inputs.length) card.appendChild(provRow("reads / inputs", inputs));
+    if (cellInputs.length) card.appendChild(provRow("reads / inputs", cellInputs));
     const link = el("a", "prov-link"); link.appendChild(iconEl("arrow-left", 14)); link.appendChild(el("span", null, t("prov.review.viewCode"))); link.onclick = () => { S.provMode = false; setActiveTab("notebook"); scrollToCell(cell.cell_index, cell.kernel_id); }; card.appendChild(link);
   } else if (inputs.length) card.appendChild(provRow("reads / inputs", inputs));
-  body.appendChild(card);
+  if (cell || inputs.length) body.appendChild(card);
+  captures.filter(capture => capture && (capture.capture_kind === "head_checksum_reused" || !cell)).forEach(capture => {
+    const captureCard = el("div", "prov-card");
+    const identity = publicText(capture.producing_cell_id || "unknown Cell", 96);
+    // A delegated capture's cell_index orders the CHILD frame's own log; a
+    // root-Notebook heading or view-code link for it would point at a root
+    // cell that does not exist.
+    const captureInRootNotebook = capture.cell_index != null && capture.frame_kind !== "delegate";
+    captureCard.appendChild(el("div", "prov-h", captureInRootNotebook ? t("prov.review.producedBy", capture.cell_index) : t("prov.review.producedByIdentity", identity)));
+    const captureKind = capture.capture_kind === "head_checksum_reused" ? t("prov.review.sameBytesCapture") : t("prov.review.versionCapture");
+    const frameMeta = capture.frame_id ? (" · " + t("prov.review.producerFrame", publicText(capture.frame_kind || "unknown", 32), publicText(capture.frame_id, 96))) : "";
+    captureCard.appendChild(el("div", "prov-meta", captureKind + " · " + identity + frameMeta));
+    if (Array.isArray(capture.inputs) && capture.inputs.length) captureCard.appendChild(provRow("reads / inputs", capture.inputs));
+    if (captureInRootNotebook) {
+      const link = el("a", "prov-link"); link.appendChild(iconEl("arrow-left", 14)); link.appendChild(el("span", null, t("prov.review.viewCode"))); link.onclick = () => { S.provMode = false; setActiveTab("notebook"); scrollToCell(capture.cell_index, capture.kernel_id); }; captureCard.appendChild(link);
+    }
+    body.appendChild(captureCard);
+  });
+  if (!cell && !captures.length && producer) {
+    const producerCard = el("div", "prov-card");
+    const producerHeading = producer.kind === "cell" ? t("prov.review.producedByIdentity", publicText(producer.producing_cell_id || "unknown Cell", 96)) : t("prov.review.nonCellProducer");
+    producerCard.appendChild(el("div", "prov-h", producerHeading));
+    if (producer.frame_id) producerCard.appendChild(el("div", "prov-meta", t("prov.review.producerFrame", publicText(producer.frame_kind || "unknown", 32), publicText(producer.frame_id, 96))));
+    body.appendChild(producerCard);
+  }
   const save = inter.find(i => i.kind === "save");
   if (save && save.at) body.appendChild(el("div", "prov-meta", t("prov.review.saved", ago(save.at))));
 }
 function openKetcher() { $("#modal-title").textContent = t("ketcher.modalTitle"); $("#modal-download").style.display = "none"; const body = $("#modal-body"); body.innerHTML = ""; const f = el("iframe"); f.src = (S.sandboxOrigin || "") + "/ketcher"; f.setAttribute("allow", "clipboard-read; clipboard-write"); body.appendChild(f); openModalEl($("#modal")); }
+function renderLocatorComments(container, a, kind, viewer) {
+  const box = el("div", "wb-locator");
+  box.appendChild(el("div", "wb-locator-title", t("wb.locator.title")));
+  const quote = el("textarea", "wb-locator-quote"); quote.placeholder = t("wb.locator.quote");
+  const selector = el("input", "wb-locator-selector"); selector.placeholder = t("wb.locator.selector");
+  const comment = el("textarea", "wb-locator-body"); comment.placeholder = t("wb.locator.body");
+  const save = el("button", "solid-btn small", t("common.save"));
+  const preview = el("pre", "wb-locator-preview");
+  let pdfPage = null, pdfPages = [];
+  const selectPdfPage = value => {
+    if (!pdfPage) return 1;
+    const page = Math.max(1, Math.floor(Number(value) || 1)); pdfPage.value = String(page);
+    if (viewer && viewer.dataset.currentPage !== String(page)) {
+      const base = String(viewer.src || artUrl(a)).split("#", 1)[0];
+      viewer.dataset.currentPage = String(page); viewer.src = base + "#page=" + encodeURIComponent(page);
+    }
+    const extracted = pdfPages.find(item => Number(item && item.page) === page);
+    preview.textContent = extracted ? String(extracted.text || "").slice(0, 4000) : "";
+    return page;
+  };
+  if (kind === "pdf") {
+    const pageControls = el("div", "wb-pdf-page-controls");
+    const label = el("label", "wb-pdf-page-label", t("wb.locator.pdfPage"));
+    pdfPage = el("input", "wb-pdf-page"); pdfPage.type = "number"; pdfPage.min = "1"; pdfPage.step = "1"; pdfPage.value = "1";
+    label.appendChild(pdfPage); pageControls.appendChild(label);
+    const previous = el("button", "outline-btn small", t("wb.locator.pdfPrev")); previous.type = "button";
+    const next = el("button", "outline-btn small", t("wb.locator.pdfNext")); next.type = "button";
+    previous.onclick = () => selectPdfPage(Number(pdfPage.value) - 1);
+    next.onclick = () => selectPdfPage(Number(pdfPage.value) + 1);
+    pdfPage.onchange = () => selectPdfPage(pdfPage.value);
+    pageControls.appendChild(previous); pageControls.appendChild(next); box.appendChild(pageControls);
+  }
+  if (kind === "html") box.appendChild(selector);
+  box.appendChild(quote); box.appendChild(comment); box.appendChild(save);
+  box.appendChild(preview);
+  container.appendChild(box);
+  const endpoint = kind === "pdf" ? "pdf-text" : "html-outline";
+  api(`/artifacts/${encodeURIComponent(a.id)}/${endpoint}`).then(payload => {
+    if (kind === "pdf") { pdfPages = Array.isArray(payload.pages) ? payload.pages : []; selectPdfPage(pdfPage.value); }
+    else preview.textContent = (payload.elements || []).map(item => (item.selector || item.tag) + " " + (item.text || "")).join("\n").slice(0, 4000);
+  }).catch(() => { preview.textContent = ""; });
+  save.onclick = async () => {
+    if (!S.currentId || !String(comment.value || "").trim()) return;
+    save.disabled = true;
+    try {
+      await api(`/frames/${S.currentId}/annotations`, {
+        method: "POST",
+        body: JSON.stringify({
+          artifact_id: a.id,
+          artifact_name: a.filename,
+          kind,
+          body: comment.value,
+          locator: kind === "pdf"
+            ? { page: selectPdfPage(pdfPage.value), quote: quote.value }
+            : { selector: selector.value, quote: quote.value },
+        }),
+      });
+      comment.value = ""; hint(t("wb.locator.saved"));
+      if (S.currentId) loadAnnotations(S.currentId);
+    } catch (error) { hint(t("wb.locator.err", apiErrorText(error)), true); }
+    save.disabled = false;
+  };
+}
 
 /* ---------- upload ---------- */
 function uploadFiles(files) {
@@ -9959,7 +11253,7 @@ async function custSkills(c) {
     const nb = el("button", "outline-btn small", t("cust.skills.newBtn")); nb.onclick = () => skillEditor(null);
     const ib = el("button", "outline-btn small", t("cust.skills.importBtn")); ib.onclick = () => skillImport();
     acts.appendChild(nb); acts.appendChild(ib); bi.appendChild(el("div", "nm", t("cust.skills.yourSkills"))); bi.appendChild(acts); bar.appendChild(bi); c.appendChild(bar);
-    skills.forEach(s => {
+    const skillRow = (s) => {
       const scope = s.scope === "project" ? "project" : (s.scope === "bundled" ? "bundled" : "personal");
       const row = el("div", "cust-row"); const info = el("div", "info"); const nm = el("div", "nm");
       nm.appendChild(el("span", null, s.displayName || s.name)); nm.appendChild(document.createTextNode(" ")); nm.appendChild(el("span", "pill", t(`skill.scope.${scope}`)));
@@ -9968,7 +11262,32 @@ async function custSkills(c) {
       if (s.versioned) { const vb = el("button", "icon-ghost"); vb.title = t("skill.historyBtn"); vb.innerHTML = icon("clock", 15); vb.onclick = () => skillVersionHistory(s.name, scope, scope === "project" ? pid : null); row.appendChild(vb); }
       if (s.editable && scope === "personal") { const eb = el("button", "icon-ghost"); eb.title = t("common.edit"); eb.innerHTML = icon("pencil", 15); eb.onclick = () => skillEditor(s.name); row.appendChild(eb); const db = el("button", "icon-ghost"); db.title = t("common.delete"); db.innerHTML = icon("trash-2", 15); db.onclick = async () => { if (!confirm(t("cust.skills.deleteConfirm", s.name))) return; try { await api(`/skills/${encodeURIComponent(s.name)}`, { method: "DELETE" }); S.skillsCatalog = null; custTab("skills"); } catch (e) { hint(t("toast.deleteFailed", apiErrorText(e)), true); } }; row.appendChild(db); }
       if (scope !== "project") { const tg = el("button", "toggle" + (s.enabled !== false ? " on" : "")); tg.onclick = async () => { const on = tg.classList.toggle("on"); try { await api(`/skills/catalog/${encodeURIComponent(s.name)}/enabled`, { method: "PUT", body: JSON.stringify({ enabled: on }) }); } catch {} }; row.appendChild(tg); }
-      c.appendChild(row);
+      return row;
+    };
+    // `collection` is why the field exists on the wire: a pinned third-party
+    // bundle is one collapsed entry, not hundreds of rows the user has to
+    // scroll past -- and its rows are only built when they ask for them.
+    const collections = new Map();
+    skills.forEach(s => {
+      const cid = s.collection || "";
+      if (!cid) { c.appendChild(skillRow(s)); return; }
+      if (!collections.has(cid)) collections.set(cid, []);
+      collections.get(cid).push(s);
+    });
+    [...collections.keys()].sort().forEach(cid => {
+      const members = collections.get(cid);
+      const head = el("div", "cust-row"); const info = el("div", "info");
+      info.appendChild(el("div", "nm", t("cust.skills.collection", cid, members.length)));
+      info.appendChild(el("div", "ds", t("cust.skills.collectionDesc")));
+      head.appendChild(info);
+      const body = el("div", null); body.classList.add("hidden");
+      const tgl = el("button", "outline-btn small", t("cust.skills.collectionShow"));
+      tgl.onclick = () => {
+        if (!body.childElementCount) members.forEach(s => body.appendChild(skillRow(s)));
+        const open = body.classList.toggle("hidden") === false;
+        tgl.textContent = t(open ? "cust.skills.collectionHide" : "cust.skills.collectionShow");
+      };
+      head.appendChild(tgl); c.appendChild(head); c.appendChild(body);
     });
   } catch (e) { c.textContent = t("versions.load.err", e.message); }
 }
@@ -10225,18 +11544,46 @@ function dataproCard(config, configError) {
   query.onkeydown = event => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); search.click(); } };
   return card;
 }
+function connectorEditor(k) {
+  S._modalMode = "connector:" + k.connector_id;
+  $("#modal-title").textContent = t("cust.connectors.editTitle", k.name);
+  $("#modal-download").style.display = "none";
+  const body = $("#modal-body"); body.innerHTML = ""; const form = el("div", "skill-form");
+  const nameIn = el("input", "cust-input"); nameIn.value = k.name || "";
+  const descIn = el("textarea", "connector-edit-area"); descIn.rows = 3; descIn.value = k.description || "";
+  const cmdIn = el("textarea", "connector-edit-area connector-json"); cmdIn.rows = 3; cmdIn.spellcheck = false; cmdIn.value = JSON.stringify(k.command || [], null, 2);
+  const argsIn = el("textarea", "connector-edit-area connector-json"); argsIn.rows = 2; argsIn.spellcheck = false; argsIn.value = JSON.stringify(k.args || [], null, 2);
+  const keys = Array.isArray(k.env_keys) ? k.env_keys : [];
+  const configured = el("div", "connector-env-state", keys.length ? t("cust.connectors.envConfigured", keys.join(", ")) : t("cust.connectors.envNone"));
+  const envIn = el("textarea", "connector-edit-area connector-json"); envIn.rows = 4; envIn.spellcheck = false; envIn.placeholder = t("cust.connectors.envUpdatesPlaceholder");
+  const removeIn = el("textarea", "connector-edit-area connector-json"); removeIn.rows = 3; removeIn.spellcheck = false; removeIn.placeholder = t("cust.connectors.envRemovePlaceholder");
+  [["cust.connectors.namePlaceholder", nameIn], ["skill.label.desc", descIn], ["cust.connectors.commandLabel", cmdIn], ["cust.connectors.argsLabel", argsIn]].forEach(([label, input]) => { form.appendChild(el("label", "skill-lbl", t(label))); form.appendChild(input); });
+  form.appendChild(configured); form.appendChild(el("label", "skill-lbl", t("cust.connectors.envUpdatesLabel"))); form.appendChild(envIn); form.appendChild(el("label", "skill-lbl", t("cust.connectors.envRemoveLabel"))); form.appendChild(removeIn);
+  const save = el("button", "solid-btn", t("common.save")); save.onclick = async () => {
+    let command, args; try { command = JSON.parse(cmdIn.value); args = JSON.parse(argsIn.value || "[]"); } catch { hint(t("cust.connectors.invalidJson"), true); return; }
+    if ((!Array.isArray(command) && typeof command !== "string") || !command.length || !Array.isArray(args)) { hint(t("cust.connectors.invalidJson"), true); return; }
+    const envUpdates = {}; for (const raw of envIn.value.split(/\r?\n/)) { if (!raw.trim()) continue; const at = raw.indexOf("="); if (at <= 0) { hint(t("cust.connectors.invalidEnv"), true); return; } envUpdates[raw.slice(0, at).trim()] = raw.slice(at + 1); }
+    const removeEnv = removeIn.value.split(/\r?\n/).map(v => v.trim()).filter(Boolean);
+    if (removeEnv.some(name => Object.prototype.hasOwnProperty.call(envUpdates, name))) { hint(t("cust.connectors.invalidEnv"), true); return; }
+    save.disabled = true; save.textContent = t("common.saving");
+    try { await api(`/connectors/${encodeURIComponent(k.connector_id)}`, { method: "PUT", body: JSON.stringify({ name: nameIn.value.trim(), description: descIn.value, command, args, env_updates: envUpdates, remove_env: removeEnv }) }); closeModalEl($("#modal")); hint(t("cust.connectors.saved", nameIn.value.trim())); custTab("connectors"); }
+    catch (e) { save.disabled = false; save.textContent = t("common.save"); hint(t("artifact.save.err", apiErrorText(e)), true); }
+  };
+  const actions = el("div", "form-actions"); actions.appendChild(save); form.appendChild(actions); body.appendChild(form); openModalEl($("#modal"));
+}
 async function custConnectors(c) { try {
   const [d, datapro] = await Promise.all([api("/connectors"), api("/datapro/config").then(config => ({ config })).catch(error => ({ config: {}, error }))]); const conns = (d && d.connectors) || [];
   c.innerHTML = ""; c.appendChild(hdr(t("cust.tab.connectors"), t("cust.connectors.desc")));
   c.appendChild(dataproCard(datapro.config, datapro.error));
-  conns.filter(k => k.connector_id !== DATAPRO_CONNECTOR_ID).forEach(k => { const row = el("div", "cust-row"); const info = el("div", "info"); const nm = el("div", "nm"); nm.appendChild(el("span", null, k.name)); nm.appendChild(document.createTextNode(" ")); nm.appendChild(el("span", "pill", k.connector_id)); info.appendChild(nm); info.appendChild(el("div", "ds", (k.description || "") + "  ·  " + (k.command_display || ""))); row.appendChild(info);
+  conns.filter(k => k.connector_id !== DATAPRO_CONNECTOR_ID).forEach(k => { const row = el("div", "cust-row"); const info = el("div", "info"); const nm = el("div", "nm"); nm.appendChild(el("span", null, k.name)); nm.appendChild(document.createTextNode(" ")); nm.appendChild(el("span", "pill", k.connector_id)); info.appendChild(nm); info.appendChild(el("div", "ds", k.description || "")); row.appendChild(info);
+    const eb = el("button", "icon-ghost"); eb.title = t("common.edit"); eb.innerHTML = icon("pencil", 15); eb.onclick = () => connectorEditor(k); row.appendChild(eb);
     const pb = el("button", "outline-btn small", t("cust.connectors.test")); pb.onclick = async () => { pb.disabled = true; pb.textContent = t("cust.connectors.testing"); try { const r = await api(`/connectors/${k.connector_id}/probe`, { method: "POST" }); hint(r.ok ? (t("toast.connectors.probeOk", (r.tools || []).map(t => t.name).join("、"))) : (t("toast.failed", (r.error || "")))); } catch (e) { hint(t("toast.connectors.testFailed", apiErrorText(e)), true); } pb.disabled = false; pb.textContent = t("cust.connectors.test"); }; row.appendChild(pb);
     const tg = el("button", "toggle" + (k.enabled ? " on" : "")); tg.onclick = async () => { const on = tg.classList.toggle("on"); try { await api(`/connectors/${k.connector_id}/enabled`, { method: "PUT", body: JSON.stringify({ enabled: on }) }); } catch {} }; row.appendChild(tg);
     const db = el("button", "icon-ghost"); db.title = t("common.delete"); db.innerHTML = icon("trash-2", 15); db.onclick = async () => { if (!confirm(t("cust.connectors.deleteConfirm", k.name))) return; try { await api(`/connectors/${k.connector_id}`, { method: "DELETE" }); custTab("connectors"); } catch {} }; row.appendChild(db); c.appendChild(row); });
   // directory (one-click add)
   c.appendChild(el("div", "cust-subhead", t("cust.connectors.fromDirectory")));
   let dir = { directory: [] }; try { dir = await api("/connectors/directory"); } catch {}
-  (dir.directory || []).forEach(item => { if (item.id === DATAPRO_CONNECTOR_ID || conns.some(k => k.connector_id === item.id)) return; const row = el("div", "cust-row"); const info = el("div", "info"); info.appendChild(el("div", "nm", item.name)); info.appendChild(el("div", "ds", item.description || "")); row.appendChild(info); const add = el("button", "outline-btn small", t("common.add")); add.onclick = async () => { try { await api("/connectors", { method: "POST", body: JSON.stringify({ connector_id: item.id, name: item.name, description: item.description, command: item.command }) }); hint(t("toast.connectors.added", item.name)); custTab("connectors"); } catch (e) { hint(t("toast.addFailed", apiErrorText(e)), true); } }; row.appendChild(add); c.appendChild(row); });
+  (dir.directory || []).forEach(item => { if (item.id === DATAPRO_CONNECTOR_ID || conns.some(k => k.connector_id === item.id)) return; const row = el("div", "cust-row"); const info = el("div", "info"); info.appendChild(el("div", "nm", item.name)); info.appendChild(el("div", "ds", item.description || "")); row.appendChild(info); const add = el("button", "outline-btn small", t("common.add")); add.onclick = async () => { try { const request = { connector_id: item.id, name: item.name, description: item.description, command: item.command }; if (item.args) request.args = item.args; if (item.env) request.env = item.env; await api("/connectors", { method: "POST", body: JSON.stringify(request) }); hint(t("toast.connectors.added", item.name)); custTab("connectors"); } catch (e) { hint(t("toast.addFailed", apiErrorText(e)), true); } }; row.appendChild(add); c.appendChild(row); });
   // custom add
   const add = el("div", "cust-row"); const ai = el("div", "info"); ai.appendChild(el("div", "nm", t("cust.connectors.customAddName"))); const ad = el("div", "job-submit"); const nameIn = el("input", "cust-input"); nameIn.placeholder = t("cust.connectors.namePlaceholder"); nameIn.style.flex = "0 0 120px"; const cmdIn = el("input", "cust-input"); cmdIn.placeholder = t("cust.connectors.cmdPlaceholder"); const go = el("button", "solid-btn small", t("common.add")); go.onclick = async () => { const nm = nameIn.value.trim(); const cmd = cmdIn.value.trim(); if (!nm || !cmd) return; try { await api("/connectors", { method: "POST", body: JSON.stringify({ name: nm, command: cmd.split(/\s+/) }) }); nameIn.value = cmdIn.value = ""; custTab("connectors"); } catch (e) { hint(t("toast.addFailed", apiErrorText(e)), true); } }; ad.appendChild(nameIn); ad.appendChild(cmdIn); ad.appendChild(go); ai.appendChild(ad); add.appendChild(ai); c.appendChild(add);
 } catch (e) { c.textContent = t("versions.load.err", e.message); } }
@@ -10303,7 +11650,111 @@ const infoRow = (name, detail) => {
   return row;
 };
 
-async function custCompute(c) { try { const gpu = await api("/compute/gpu"); const env = await api("/environments/status").catch(() => ({ environments: [] })); const host = await api("/compute/local/hostinfo").catch(() => ({})); c.innerHTML = ""; c.appendChild(hdr(t("cust.compute.title"), t("cust.compute.desc"))); c.appendChild(infoRow(t("cust.compute.host"), t("cust.compute.hostDetail", host.python || "?", host.machine || "", host.cpu_count || "?", host.ram_gb || "?", host.disk_free_gb || "?"))); c.appendChild(infoRow("GPU", gpu.available ? (gpu.gpu_name || t("cust.compute.gpuAvailable")) : t("cust.compute.gpuUnavailable"))); await renderRemoteGPU(c); const envs = env.environments || []; envs.forEach(e => { const inst = (e.packages || []).filter(p => p.installed); c.appendChild(infoRow(t("cust.compute.kernelLabel", e.language, e.status === "installing" ? t("cust.compute.kernelInstalling") : t("cust.compute.kernelReady")), t("cust.compute.preinstalledDetail", e.package_count, inst.slice(0, 18).map(p => p.name).join("、") + (inst.length > 18 ? " …" : "")))); }); const ins = el("div", "cust-row"); const info = el("div", "info"); info.appendChild(el("div", "nm", t("cust.compute.installExtraName"))); const dsc = el("div", "ds"); const inp = el("input"); inp.placeholder = t("cust.compute.installPlaceholder"); inp.className = "cust-input"; const btn = el("button", "outline-btn small", t("cust.compute.installBtn")); btn.onclick = async () => { const pkgs = inp.value.trim().split(/\s+/).filter(Boolean); if (!pkgs.length) return; btn.disabled = true; btn.textContent = t("cust.compute.installingBtn"); try { const r = S.currentId ? await api(`/frames/${S.currentId}/kernel/install`, { method: "POST", body: JSON.stringify({ packages: pkgs, restart: true }) }) : await api(`/kernel/install`, { method: "POST", body: JSON.stringify({ packages: pkgs }) }); hint(r.ok ? (t("step.env.installed", (r.installed || []).join("、") + (r.restarted ? t("cust.compute.kernelRestarted") : ""))) : (t("toast.compute.installFailed", ((r.failed && r.failed[0] && r.failed[0].error) || t("toast.compute.installSeeLogs"))))); if (r.ok) S._envSnapById = {}; custTab("compute"); } catch (e) { hint(t("toast.compute.installFailed", apiErrorText(e)), true); } btn.disabled = false; btn.textContent = t("cust.compute.installBtn"); }; dsc.appendChild(inp); dsc.appendChild(btn); info.appendChild(dsc); ins.appendChild(info); c.appendChild(ins); await renderJobs(c); } catch (e) { c.textContent = t("versions.load.err", e.message); } }
+function standardReadinessStateText(readiness) {
+  if (readiness.ready) return t("environment.readiness.ready");
+  if (readiness.state === "needs_setup") return t("environment.readiness.needsSetup");
+  if (readiness.state === "needs_repair") return t("environment.readiness.needsRepair");
+  return t("environment.readiness.unavailable");
+}
+function renderStandardProfileReadiness(readiness) {
+  const card = el("section", "standard-readiness-card state-" + readiness.state);
+  const head = el("div", "standard-readiness-head");
+  const title = el("div");
+  title.appendChild(el("div", "standard-readiness-title", t("environment.readiness.cardTitle")));
+  title.appendChild(el("div", "standard-readiness-summary", standardReadinessStateText(readiness)));
+  head.appendChild(title);
+  const refresh = el("button", "outline-btn small", t("environment.readiness.refresh"));
+  refresh.onclick = () => custTab("compute");
+  head.appendChild(refresh); card.appendChild(head);
+
+  if (readiness.missing_environments.length) {
+    const section = el("div", "standard-readiness-gap");
+    section.appendChild(el("div", "standard-readiness-label", t("environment.readiness.missingEnvironments")));
+    const list = el("ul");
+    readiness.missing_environments.forEach(name => list.appendChild(el("li", null, name)));
+    section.appendChild(list); card.appendChild(section);
+  }
+  Object.entries(readiness.missing_packages).forEach(([environment, packages]) => {
+    if (!packages.length) return;
+    const section = el("div", "standard-readiness-gap");
+    section.appendChild(el("div", "standard-readiness-label", t("environment.readiness.missingPackages", environment)));
+    const list = el("ul", "standard-readiness-packages");
+    packages.forEach(packageName => list.appendChild(el("li", null, packageName)));
+    section.appendChild(list); card.appendChild(section);
+  });
+
+  const remediation = readiness.remediation;
+  if (remediation && remediation.requires_explicit_action && remediation.commands.length) {
+    const section = el("div", "standard-readiness-remediation");
+    section.appendChild(el("div", "standard-readiness-label", t("environment.readiness.remediation")));
+    section.appendChild(el("div", "standard-readiness-explicit", t("environment.readiness.explicitOnly")));
+    remediation.commands.forEach(item => {
+      const row = el("div", "standard-readiness-command");
+      const command = el("code", null, item.command);
+      if (item.label) command.setAttribute("aria-label", item.label);
+      const copy = el("button", "outline-btn small", t("environment.readiness.copy"));
+      copy.onclick = async () => {
+        try {
+          if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("clipboard unavailable");
+          await navigator.clipboard.writeText(item.command);
+          copy.textContent = t("code.copied");
+          hint(t("environment.readiness.copied"));
+          setTimeout(() => { copy.textContent = t("environment.readiness.copy"); }, 1200);
+        } catch { hint(t("nb.action.failed"), true); }
+      };
+      row.appendChild(command); row.appendChild(copy); section.appendChild(row);
+    });
+    card.appendChild(section);
+  }
+  return card;
+}
+
+async function custCompute(c) {
+  try {
+    const [gpu, env, host] = await Promise.all([
+      api("/compute/gpu").catch(() => ({ available: false })),
+      refreshEnvironmentStatus().then(status => status || { environments: [] }),
+      api("/compute/local/hostinfo").catch(() => ({})),
+    ]);
+    c.innerHTML = "";
+    c.appendChild(hdr(t("cust.compute.title"), t("cust.compute.desc")));
+    const readiness = S.standardProfileReadiness;
+    if (readiness && readiness.enabled) c.appendChild(renderStandardProfileReadiness(readiness));
+    c.appendChild(infoRow(t("cust.compute.host"), t("cust.compute.hostDetail", host.python || "?", host.machine || "", host.cpu_count || "?", host.ram_gb || "?", host.disk_free_gb || "?")));
+    c.appendChild(infoRow("GPU", gpu.available ? (gpu.gpu_name || t("cust.compute.gpuAvailable")) : t("cust.compute.gpuUnavailable")));
+    await renderRemoteGPU(c);
+    const envs = env.environments || [];
+    envs.forEach(e => {
+      const inst = (e.packages || []).filter(p => p.installed);
+      c.appendChild(infoRow(
+        t("cust.compute.kernelLabel", e.language, e.status === "installing" ? t("cust.compute.kernelInstalling") : t("cust.compute.kernelReady")),
+        t("cust.compute.preinstalledDetail", e.package_count, inst.slice(0, 18).map(p => p.name).join("、") + (inst.length > 18 ? " …" : ""))
+      ));
+    });
+    const ins = el("div", "cust-row"); const info = el("div", "info");
+    info.appendChild(el("div", "nm", t("cust.compute.installExtraName")));
+    const dsc = el("div", "ds"); const inp = el("input");
+    inp.placeholder = t("cust.compute.installPlaceholder"); inp.className = "cust-input";
+    const btn = el("button", "outline-btn small", t("cust.compute.installBtn"));
+    btn.onclick = async () => {
+      const pkgs = inp.value.trim().split(/\s+/).filter(Boolean); if (!pkgs.length) return;
+      btn.disabled = true; btn.textContent = t("cust.compute.installingBtn");
+      try {
+        const r = S.currentId
+          ? await api(`/frames/${S.currentId}/kernel/install`, { method: "POST", body: JSON.stringify({ packages: pkgs, restart: true }) })
+          : await api(`/kernel/install`, { method: "POST", body: JSON.stringify({ packages: pkgs }) });
+        hint(r.ok
+          ? t("step.env.installed", (r.installed || []).join("、") + (r.restarted ? t("cust.compute.kernelRestarted") : ""))
+          : t("toast.compute.installFailed", ((r.failed && r.failed[0] && r.failed[0].error) || t("toast.compute.installSeeLogs"))));
+        if (r.ok) S._envSnapById = {};
+        custTab("compute");
+      } catch (e) { hint(t("toast.compute.installFailed", apiErrorText(e)), true); }
+      btn.disabled = false; btn.textContent = t("cust.compute.installBtn");
+    };
+    dsc.appendChild(inp); dsc.appendChild(btn); info.appendChild(dsc); ins.appendChild(info); c.appendChild(ins);
+    await renderJobs(c);
+  } catch (e) { c.textContent = t("versions.load.err", e.message); }
+}
 async function renderJobs(c) {
   c.appendChild(hdr(t("cust.jobs.title"), t("cust.jobs.desc")));
   const sub = el("div", "cust-row"); const si = el("div", "info"); si.appendChild(el("div", "nm", t("cust.jobs.submitName")));
@@ -10697,6 +12148,430 @@ function modelProtocolOptions(served) {
   // tOptional, not t: a missing translation must not put a dot-key in a menu.
   return list.map(id => ({ value: id, label: tOptional(labelKeys[id] || "") || id }));
 }
+
+function volcCommand(label, iconName, className = "outline-btn small") {
+  const button = el("button", className);
+  button.appendChild(iconEl(iconName, 14));
+  button.appendChild(el("span", null, label));
+  return button;
+}
+
+function volcPercent(period) {
+  const direct = Number(period && period.percent);
+  if (Number.isFinite(direct)) return Math.max(0, Math.min(100, direct));
+  const used = Number(period && period.used), total = Number(period && period.total);
+  return Number.isFinite(used) && Number.isFinite(total) && total > 0
+    ? Math.max(0, Math.min(100, used * 100 / total)) : 0;
+}
+
+function volcQuotaValue(period) {
+  const used = Number(period && period.used), total = Number(period && period.total);
+  if (Number.isFinite(used) && Number.isFinite(total)) {
+    return `${used.toLocaleString()} / ${total.toLocaleString()}`;
+  }
+  return `${Math.round(volcPercent(period))}%`;
+}
+
+function volcNotice(root, tone, title, body) {
+  const notice = el("div", `volc-notice ${tone || ""}`.trim());
+  notice.appendChild(iconEl(tone === "ok" ? "check" : tone === "warn" ? "alert-triangle" : "terminal", 17));
+  const copy = el("div", "volc-notice-copy");
+  copy.appendChild(el("div", "volc-notice-title", title));
+  if (body) copy.appendChild(el("div", "volc-notice-body", body));
+  notice.appendChild(copy); root.appendChild(notice);
+  return notice;
+}
+
+function volcExternal(label, url, iconName = "globe", onOpen = null) {
+  const button = volcCommand(label, iconName);
+  button.onclick = () => {
+    openVolcengineAuthorization(url);
+    if (typeof onOpen === "function") onOpen();
+  };
+  return button;
+}
+
+function volcApiKeyUrl(state) {
+  const raw = String((((state || {}).identity || {}).region) || "cn-beijing").toLowerCase();
+  const region = /^[a-z0-9-]{2,64}$/.test(raw) ? raw : "cn-beijing";
+  return `https://console.volcengine.com/ark/region:ark+${region}/apiKey`;
+}
+
+function stopVolcengineKeyPolling(root) {
+  if (root._volcKeyPollTimer) clearTimeout(root._volcKeyPollTimer);
+  root._volcKeyPollTimer = null;
+  root._volcKeyPollAttempts = 0;
+}
+
+function startVolcengineKeyPolling(root) {
+  stopVolcengineKeyPolling(root);
+  const poll = async () => {
+    if (!root.isConnected) return;
+    root._volcKeyPollAttempts = Number(root._volcKeyPollAttempts || 0) + 1;
+    try {
+      const next = await refreshVolcengine(root);
+      const accessState = ((next || {}).access || {}).state;
+      if (!["key_missing", "no_plan", "key_check_failed"].includes(accessState)) {
+        stopVolcengineKeyPolling(root);
+        return;
+      }
+    } catch (_) { /* Keep the explicit recheck action available. */ }
+    if (root._volcKeyPollAttempts < 24) {
+      root._volcKeyPollTimer = setTimeout(poll, 5000);
+    } else {
+      stopVolcengineKeyPolling(root);
+      if (root.isConnected && root._volcState) renderVolcenginePanel(root, root._volcState);
+    }
+  };
+  root._volcKeyPollAttempts = 0;
+  root._volcKeyPollTimer = setTimeout(poll, 2500);
+  if (root._volcState) renderVolcenginePanel(root, root._volcState);
+}
+
+function openVolcengineAuthorization(url, popup = null) {
+  if (!url) return null;
+  let target = popup;
+  try {
+    if (target && !target.closed) target.location.href = url;
+    else target = window.open(url, "_blank", "noopener,noreferrer");
+    if (target && typeof target.focus === "function") target.focus();
+  } catch (_) { /* The fallback button remains available if the browser blocks it. */ }
+  return target;
+}
+
+async function refreshVolcengine(root, { autoConfigure = true, announce = false } = {}) {
+  const next = await api("/volcengine/refresh", { method: "POST" });
+  const plans = (next.plans || []).filter(plan => plan && plan.available !== false);
+  const accessState = (next.access || {}).state;
+  const checkFailed = ["check_failed", "key_check_failed", "endpoint_check_failed"].includes(accessState);
+  root._volcRefreshMessage = announce && !checkFailed ? t("cust.volc.rechecked") : "";
+  renderVolcenginePanel(root, next);
+  // Auto-configure only while never linked: once the Volcengine profile
+  // exists, `!configured` means the user deliberately activated a different
+  // profile, and a read-labeled Recheck (or a poll tick) must not switch the
+  // instance back to Ark behind their back.
+  if (autoConfigure && !next.configured && !next.linked && plans.length === 1 && accessState === "ready") {
+    await configureVolcengine(root, next, plans[0].key);
+  } else if (autoConfigure && !next.configured && !next.linked && accessState === "platform_ready") {
+    await configureVolcengine(root, next, "platform", "", (next.access || {}).endpoint_choice || "");
+  }
+  return next;
+}
+
+function renderVolcenginePanel(root, raw) {
+  const state = raw && typeof raw === "object" ? raw : {};
+  root._volcState = state;
+  root.innerHTML = "";
+  const login = state.login || {}, identity = state.identity || {};
+  const top = el("div", "volc-head"), identityBox = el("div", "info");
+  identityBox.appendChild(el("div", "nm", t("cust.volc.title")));
+  let statusText = t("cust.volc.disconnected"), statusClass = "";
+  if (state.state === "connected") { statusText = t("cust.volc.connected"); statusClass = " ok"; }
+  else if (state.state === "expired") statusText = t("cust.volc.expired");
+  else if (state.state === "not_installed") statusText = t("cust.volc.notInstalled");
+  if (identity.name) {
+    const detail = [identity.name, identity.project_name ? t("cust.volc.project", identity.project_name) : ""].filter(Boolean).join(" / ");
+    identityBox.appendChild(el("div", "ds", detail));
+  }
+  top.appendChild(identityBox); top.appendChild(el("span", "volc-status" + statusClass, statusText)); root.appendChild(top);
+
+  const actions = el("div", "volc-actions");
+  if (state.state === "not_installed") {
+    const install = volcCommand(t("cust.volc.getConnector"), "globe", "solid-btn small");
+    install.onclick = () => window.open("https://github.com/volcengine/ark-cli", "_blank", "noopener");
+    actions.appendChild(install); root.appendChild(actions); return;
+  }
+
+  if (login.state === "connecting") {
+    volcNotice(root, "info", t("cust.volc.authTitle"), t("cust.volc.connecting"));
+    root.appendChild(el("div", "volc-project-hint", t("cust.volc.projectHint")));
+    const cancel = volcCommand(t("cust.volc.cancel"), "x");
+    cancel.onclick = async () => {
+      try { const next = await api("/volcengine/login/cancel", { method: "POST" }); renderVolcenginePanel(root, { ...state, login: next }); }
+      catch (error) { hint(apiErrorText(error), true); }
+    };
+    actions.appendChild(cancel); root.appendChild(actions); return;
+  }
+
+  if (login.state === "awaiting_code") {
+    volcNotice(root, "info", t("cust.volc.authTitle"), t("cust.volc.authBody"));
+    if (state._error) root.appendChild(el("div", "timeline-error", publicText(state._error, 240)));
+    root.appendChild(el("div", "volc-project-hint", t("cust.volc.projectHint")));
+    const auth = volcCommand(t("cust.volc.openAuth"), "globe", "solid-btn small");
+    auth.onclick = () => openVolcengineAuthorization(login.authorize_url);
+    const code = el("input", "cust-input volc-code"); code.placeholder = t("cust.volc.codePlaceholder"); code.autocomplete = "off";
+    const complete = volcCommand(t("cust.volc.complete"), "link");
+    const abandon = volcCommand(t("cust.volc.cancel"), "x");
+    abandon.onclick = async () => {
+      try { const next = await api("/volcengine/login/cancel", { method: "POST" }); renderVolcenginePanel(root, { ...state, login: next }); }
+      catch (error) { hint(apiErrorText(error), true); }
+    };
+    complete.onclick = async () => {
+      const value = code.value.trim(); if (!value) { code.focus(); return; }
+      complete.disabled = true;
+      try {
+        await api("/volcengine/login/complete", { method: "POST", body: JSON.stringify({ code: value }) });
+        code.value = "";
+        await refreshVolcengine(root);
+      } catch (error) {
+        complete.disabled = false;
+        try {
+          const next = await api("/volcengine/connection");
+          renderVolcenginePanel(root, { ...next, _error: apiErrorText(error) });
+        } catch (_) { hint(apiErrorText(error), true); }
+      }
+    };
+    actions.appendChild(auth); actions.appendChild(code); actions.appendChild(complete); actions.appendChild(abandon); root.appendChild(actions); return;
+  }
+
+  if (login.state === "failed") {
+    const code = login.error_code || "";
+    const detail = login.error_detail || state._error || code;
+    if (code === "project_selection_required") {
+      volcNotice(root, "warn", t("cust.volc.projectRequiredTitle"), `${t("cust.volc.projectRequiredBody")} ${detail && detail !== code ? detail : ""}`.trim());
+    } else if (code === "interactive_terminal_unavailable") {
+      volcNotice(root, "warn", t("cust.volc.cliSetupTitle"), `${t("cust.volc.cliSetupBody")} ${detail && detail !== code ? detail : ""}`.trim());
+    } else {
+      volcNotice(root, "warn", t("cust.volc.failed"), detail);
+    }
+    const retry = volcCommand(t("cust.volc.retrySetup"), "refresh", "solid-btn small");
+    retry.onclick = () => startVolcengineLogin(root);
+    actions.appendChild(retry);
+    if (state.state !== "connected") {
+      const recheck = volcCommand(t("cust.volc.recheck"), "refresh");
+      recheck.onclick = async () => {
+        recheck.disabled = true;
+        try { await refreshVolcengine(root); }
+        catch (error) { recheck.disabled = false; hint(t("cust.volc.refreshFailed", apiErrorText(error)), true); }
+      };
+      actions.appendChild(recheck); root.appendChild(actions); return;
+    }
+  }
+  if (state._error) root.appendChild(el("div", "timeline-error", publicText(state._error, 240)));
+
+  if (state.state !== "connected") {
+    const prepKey = identity.project_name ? "cust.volc.reconnectPrep" : "cust.volc.loginPrep";
+    root.appendChild(el("div", "volc-login-prep", t(prepKey)));
+    const connect = volcCommand(t("cust.volc.connect"), "link", "solid-btn small");
+    connect.onclick = () => startVolcengineLogin(root);
+    actions.appendChild(connect); root.appendChild(actions); return;
+  }
+
+  const plans = Array.isArray(state.plans) ? state.plans.filter(plan => plan && plan.available !== false) : [];
+  const access = state.access || {};
+  let selected = root.dataset.planKey || state.configured_plan_key || access.plan_key || "";
+  if (plans.length) {
+    if (!plans.some(plan => plan.key === selected)) selected = plans[0].key;
+    root.dataset.planKey = selected;
+    if (plans.length > 1) {
+      volcNotice(root, "info", t("cust.volc.choiceTitle"), t("cust.volc.choiceBody"));
+      const chooser = el("div", "volc-plan-row"); chooser.appendChild(el("label", "skill-lbl", t("cust.volc.plan")));
+      const select = el("select", "cust-input");
+      plans.forEach(plan => {
+        const option = el("option"); option.value = plan.key;
+        option.textContent = [plan.name || plan.key, plan.tier, plan.scope].filter(Boolean).join(" / ");
+        select.appendChild(option);
+      });
+      select.value = selected; select.onchange = () => { root.dataset.planKey = select.value; renderVolcenginePanel(root, state); };
+      chooser.appendChild(select); root.appendChild(chooser);
+    }
+
+    const usageItems = ((state.usage || {}).items || []).filter(item => !item.product || item.product === selected);
+    const periods = usageItems.flatMap(item => Array.isArray(item.periods) ? item.periods : []);
+    if (periods.length) {
+      root.appendChild(el("div", "cust-subhead volc-quota-title", t("cust.volc.quota")));
+      const quotas = el("div", "volc-quotas");
+      periods.forEach(period => {
+        const row = el("div", "volc-quota");
+        const labels = el("div", "volc-quota-labels"); labels.appendChild(el("span", null, publicText(period.label, 24))); labels.appendChild(el("span", null, volcQuotaValue(period)));
+        const progress = el("div", "volc-progress"); const fill = el("span"); fill.style.width = `${volcPercent(period)}%`; progress.appendChild(fill);
+        row.appendChild(labels); row.appendChild(progress);
+        if (period.reset_at) {
+          const parsed = new Date(period.reset_at); const reset = Number.isNaN(parsed.getTime()) ? period.reset_at : parsed.toLocaleString();
+          row.appendChild(el("div", "volc-reset", t("cust.volc.reset", publicText(reset, 80))));
+        }
+        quotas.appendChild(row);
+      });
+      root.appendChild(quotas);
+    }
+  }
+
+  const selectedPlan = plans.find(plan => plan.key === selected) || null;
+  const accessState = access.state === "plan_choice_required" && selectedPlan
+    ? selectedPlan.key_state
+    : (access.state || (plans.length ? "key_check_failed" : "no_plan"));
+  const pollingForKey = Boolean(root._volcKeyPollTimer);
+  const configuredForSelection = Boolean(state.configured && state.configured_plan_key === (selected || access.plan_key));
+  const resourceCheckFailed = ["check_failed", "key_check_failed", "endpoint_check_failed"].includes(accessState);
+  if (accessState === "no_plan") {
+    volcNotice(root, "warn", t("cust.volc.connectedNoAccessTitle"), t("cust.volc.noPlanBody"));
+    actions.appendChild(volcExternal(t("cust.volc.viewPlans"), "https://www.volcengine.com/activity/agentplan"));
+    if (pollingForKey) actions.appendChild(el("span", "volc-key-wait", t("cust.volc.keyWaiting")));
+    else actions.appendChild(volcExternal(t("cust.volc.createKey"), volcApiKeyUrl(state), "lock", () => startVolcengineKeyPolling(root)));
+  } else if (accessState === "key_missing") {
+    volcNotice(root, "warn", t("cust.volc.keyMissingTitle"), t("cust.volc.keyMissingBody"));
+    if (pollingForKey) actions.appendChild(el("span", "volc-key-wait", t("cust.volc.keyWaiting")));
+    else actions.appendChild(volcExternal(t("cust.volc.createKey"), volcApiKeyUrl(state), "lock", () => startVolcengineKeyPolling(root)));
+  } else if (accessState === "key_choice_required" && configuredForSelection) {
+    actions.appendChild(el("span", "volc-ready", t("cust.volc.ready")));
+  } else if (accessState === "key_choice_required") {
+    volcNotice(root, "info", t("cust.volc.keyChoiceTitle"), t("cust.volc.keyChoiceBody"));
+    const choices = Array.isArray(selectedPlan && selectedPlan.key_choices)
+      ? selectedPlan.key_choices : (Array.isArray(access.key_choices) ? access.key_choices : []);
+    const chooser = el("div", "volc-plan-row"); chooser.appendChild(el("label", "skill-lbl", t("cust.volc.apiKey")));
+    const select = el("select", "cust-input");
+    choices.forEach(choice => {
+      const option = el("option"); option.value = choice.id;
+      const name = choice.name || t("cust.volc.apiKey");
+      option.textContent = choice.suffix ? t("cust.volc.keyName", name, choice.suffix) : name;
+      select.appendChild(option);
+    });
+    let keyChoice = root.dataset.keyChoice || "";
+    if (!choices.some(choice => choice.id === keyChoice)) keyChoice = choices[0] ? choices[0].id : "";
+    root.dataset.keyChoice = keyChoice; select.value = keyChoice;
+    select.onchange = () => { root.dataset.keyChoice = select.value; };
+    chooser.appendChild(select); root.appendChild(chooser);
+    // A platform profile can need an endpoint choice at the same time; render
+    // it here and submit both, or the two 409s ping-pong forever.
+    const endpointChoices = Array.isArray(access.endpoint_choices) ? access.endpoint_choices : [];
+    if (endpointChoices.length) {
+      const endpointRow = el("div", "volc-plan-row"); endpointRow.appendChild(el("label", "skill-lbl", t("cust.volc.endpoint")));
+      const endpointSelect = el("select", "cust-input");
+      endpointChoices.forEach(choice => {
+        const option = el("option"); option.value = choice.id;
+        option.textContent = choice.name || choice.suffix || t("cust.volc.endpoint");
+        endpointSelect.appendChild(option);
+      });
+      let endpointChoice = root.dataset.endpointChoice || "";
+      if (!endpointChoices.some(choice => choice.id === endpointChoice)) endpointChoice = endpointChoices[0] ? endpointChoices[0].id : "";
+      root.dataset.endpointChoice = endpointChoice; endpointSelect.value = endpointChoice;
+      endpointSelect.onchange = () => { root.dataset.endpointChoice = endpointSelect.value; };
+      endpointRow.appendChild(endpointSelect); root.appendChild(endpointRow);
+    }
+    const use = volcCommand(t("cust.volc.usePlan"), "check", "solid-btn small");
+    use.disabled = !keyChoice;
+    use.onclick = () => configureVolcengine(root, state, selected || access.plan_key, root.dataset.keyChoice, endpointChoices.length ? root.dataset.endpointChoice : "");
+    actions.appendChild(use);
+  } else if (["profile_missing", "profile_ambiguous"].includes(accessState)) {
+    volcNotice(root, "warn", t("cust.volc.profileMissingTitle"), t("cust.volc.profileMissingBody"));
+    const setup = volcCommand(t("cust.volc.retrySetup"), "refresh", "solid-btn small");
+    setup.onclick = () => startVolcengineLogin(root); actions.appendChild(setup);
+  } else if (accessState === "plan_inactive") {
+    volcNotice(root, "warn", t("cust.volc.planInactiveTitle"), t("cust.volc.planInactiveBody"));
+    actions.appendChild(volcExternal(t("cust.volc.viewPlans"), "https://www.volcengine.com/activity/agentplan"));
+  } else if (accessState === "seat_required") {
+    volcNotice(root, "warn", t("cust.volc.seatTitle"), t("cust.volc.seatBody"));
+    actions.appendChild(volcExternal(t("cust.volc.viewPlans"), "https://console.volcengine.com/ark"));
+  } else if (accessState === "quota_exhausted") {
+    volcNotice(root, "warn", t("cust.volc.quotaTitle"), t("cust.volc.quotaBody"));
+    actions.appendChild(volcExternal(t("cust.volc.viewPlans"), "https://www.volcengine.com/activity/agentplan"));
+  } else if (configuredForSelection && resourceCheckFailed) {
+    volcNotice(root, "warn", t("cust.volc.checkFailedTitle"), t("cust.volc.checkFailedBody"));
+    actions.appendChild(el("span", "volc-ready", t("cust.volc.ready")));
+  } else if (configuredForSelection) {
+    actions.appendChild(el("span", "volc-ready", t("cust.volc.ready")));
+  } else if (accessState === "platform_ready") {
+    volcNotice(root, "ok", t("cust.volc.platformReadyTitle"), t("cust.volc.platformReadyBody"));
+    const use = volcCommand(t("cust.volc.useEndpoint"), "check", "solid-btn small");
+    use.onclick = () => configureVolcengine(root, state, "platform", "", access.endpoint_choice || "");
+    actions.appendChild(use);
+  } else if (accessState === "endpoint_choice_required") {
+    volcNotice(root, "info", t("cust.volc.endpointChoiceTitle"), t("cust.volc.endpointChoiceBody"));
+    const choices = Array.isArray(access.endpoint_choices) ? access.endpoint_choices : [];
+    const chooser = el("div", "volc-plan-row"); chooser.appendChild(el("label", "skill-lbl", t("cust.volc.endpoint")));
+    const select = el("select", "cust-input");
+    choices.forEach(choice => {
+      const option = el("option"); option.value = choice.id;
+      option.textContent = choice.name || choice.suffix || t("cust.volc.endpoint");
+      select.appendChild(option);
+    });
+    let endpointChoice = root.dataset.endpointChoice || "";
+    if (!choices.some(choice => choice.id === endpointChoice)) endpointChoice = choices[0] ? choices[0].id : "";
+    root.dataset.endpointChoice = endpointChoice; select.value = endpointChoice;
+    select.onchange = () => { root.dataset.endpointChoice = select.value; };
+    chooser.appendChild(select); root.appendChild(chooser);
+    const use = volcCommand(t("cust.volc.useEndpoint"), "check", "solid-btn small");
+    use.disabled = !endpointChoice;
+    use.onclick = () => configureVolcengine(root, state, "platform", "", root.dataset.endpointChoice);
+    actions.appendChild(use);
+  } else if (accessState === "platform_endpoint_required") {
+    volcNotice(root, "info", t("cust.volc.platformTitle"), t("cust.volc.platformBody"));
+    actions.appendChild(volcExternal(t("cust.volc.openEndpoints"), "https://console.volcengine.com/ark"));
+  } else if (resourceCheckFailed) {
+    volcNotice(root, "warn", t("cust.volc.checkFailedTitle"), t("cust.volc.checkFailedBody"));
+  } else if (plans.length) {
+    const use = volcCommand(t("cust.volc.usePlan"), "check", "solid-btn small");
+    use.onclick = () => configureVolcengine(root, state, selected); actions.appendChild(use);
+  }
+
+  const refresh = volcCommand(t("cust.volc.recheck"), "refresh");
+  refresh.onclick = async () => {
+    refresh.disabled = true;
+    root._volcRefreshMessage = "";
+    const label = refresh.querySelector("span"); if (label) label.textContent = t("cust.volc.rechecking");
+    const icon = refresh.querySelector("svg"); if (icon) icon.classList.add("spin");
+    try { await refreshVolcengine(root, { announce: true }); }
+    catch (error) { renderVolcenginePanel(root, { ...(root._volcState || state), _error: t("cust.volc.refreshFailed", apiErrorText(error)) }); }
+    finally { refresh.disabled = false; }
+  };
+  actions.appendChild(refresh);
+  if (root._volcRefreshMessage) actions.appendChild(el("span", "volc-key-wait", root._volcRefreshMessage));
+  const change = volcCommand(t("cust.volc.switch"), "refresh"); change.onclick = () => startVolcengineLogin(root); actions.appendChild(change);
+  if (state.linked) {
+    const disconnect = volcCommand(t("cust.volc.disconnect"), "x");
+    disconnect.onclick = async () => {
+      if (!confirm(t("cust.volc.disconnectConfirm"))) return;
+      disconnect.disabled = true;
+      try { await api("/volcengine/disconnect", { method: "POST", body: JSON.stringify({ confirm: true }) }); await loadModels(); refreshKeyBanner(); custTab("models"); }
+      catch (error) { disconnect.disabled = false; hint(apiErrorText(error), true); }
+    };
+    actions.appendChild(disconnect);
+  }
+  root.appendChild(actions);
+}
+
+async function configureVolcengine(root, state, planKey, apiKeyChoice = "", endpointChoice = "") {
+  // One configure at a time: the poll timer and a user click can otherwise
+  // race two POSTs from a single browser.
+  if (root._volcConfiguring) return;
+  root._volcConfiguring = true;
+  root.classList.add("busy");
+  try {
+    const result = await api("/volcengine/configure", { method: "POST", body: JSON.stringify({ plan_key: planKey, api_key_choice: apiKeyChoice || undefined, endpoint_choice: endpointChoice || undefined }) });
+    await loadModels(); refreshKeyBanner();
+    renderVolcenginePanel(root, result.connection || state);
+    custTab("models");
+  } catch (error) {
+    root.classList.remove("busy");
+    if (["ark_key_missing", "ark_key_choice_required", "ark_key_choice_invalid", "ark_endpoint_missing", "ark_endpoint_choice_required", "ark_endpoint_choice_invalid", "ark_profile_missing", "ark_profile_ambiguous", "plan_not_available"].includes(error.code)) {
+      try { await refreshVolcengine(root, { autoConfigure: false }); return; }
+      catch (_) { /* Fall through to the original actionable error. */ }
+    }
+    renderVolcenginePanel(root, { ...state, _error: t("cust.volc.configureFailed", apiErrorText(error)) });
+  } finally {
+    root._volcConfiguring = false;
+  }
+}
+
+async function startVolcengineLogin(root) {
+  // Reserve a tab during the user gesture so popup blockers do not swallow the
+  // later navigation while the local API prepares the authorization URL.
+  let authWindow = null;
+  try { authWindow = window.open("about:blank", "_blank"); } catch (_) { /* Use the fallback button. */ }
+  // Sever the reverse handle: the SSO tab (and whatever its redirect chain
+  // lands on) must not keep a window.opener onto the workbench.
+  try { if (authWindow) authWindow.opener = null; } catch (_) { /* Best effort. */ }
+  try {
+    const login = await api("/volcengine/login", { method: "POST", body: JSON.stringify({ mode: "device" }) });
+    authWindow = openVolcengineAuthorization(login.authorize_url, authWindow);
+    const state = { ...(root._volcState || {}), login };
+    renderVolcenginePanel(root, state);
+  } catch (error) {
+    try { if (authWindow && !authWindow.closed) authWindow.close(); } catch (_) { /* Ignore blocked popups. */ }
+    renderVolcenginePanel(root, { ...(root._volcState || {}), _error: apiErrorText(error) });
+  }
+}
+
 async function custModels(c) {
   c.innerHTML = ""; c.appendChild(hdr(t("cust.tab.models"), t("cust.models.subtitle2")));
   let data = { profiles: [], active_id: "", protocols: [] };
@@ -10708,6 +12583,13 @@ async function custModels(c) {
     const match = protocols.find(item => item.value === provider);
     return match ? match.label : provider;
   };
+
+  c.appendChild(el("div", "cust-subhead", t("cust.volc.title")));
+  const volcRoot = el("div", "volc-panel"); c.appendChild(volcRoot);
+  volcRoot.appendChild(el("div", "dock-empty", t("common.loading")));
+  api("/volcengine/connection")
+    .then(result => { if (volcRoot.isConnected) renderVolcenginePanel(volcRoot, result); })
+    .catch(error => { if (volcRoot.isConnected) renderVolcenginePanel(volcRoot, { state: "error", _error: apiErrorText(error) }); });
 
   // Local discovery is a read-only, fixed-loopback scan. The endpoint must be
   // explicitly added before it can affect model settings.
@@ -11446,7 +13328,10 @@ async function init() {
   document.querySelectorAll(".lang-btn").forEach(b => b.onclick = () => setLang(b.dataset.lang));
   applyLayout(localStorage.getItem("os-layout") || "comfortable");
   restoreColWidths(); initColResizers();
-  connectWS(); await loadModels(); refreshKeyBanner();
+  connectWS(); await loadModels(); await refreshEnvironmentStatus(); refreshKeyBanner();
+  document.querySelectorAll("[data-open-environment-readiness]").forEach(button => {
+    button.onclick = () => openCust("compute");
+  });
   $("#dash-new-project").onclick = () => openProjectModal();
   $("#dash-import-session").onclick = chooseSessionPackage;
   $("#session-package-input").onchange = async (event) => {
@@ -11558,3 +13443,240 @@ document.addEventListener("click", function (e) {
   clearTimeout(btn._t);
   btn._t = setTimeout(function () { btn.classList.remove("copied"); if (lbl) lbl.textContent = lbl.getAttribute("data-o") || t("msgAction.copy"); }, 1400);
 });
+
+/* ---- Team mode (docs/team-server-plan.md M1-9) -------------------------
+ * Self-contained: with team mode off and no data roots, every element
+ * stays hidden and nothing below changes the single-user UI. */
+(function teamBootstrap() {
+  "use strict";
+  function el(id) { return document.getElementById(id); }
+
+  // Identity: redirect to /login when the session died; show the user chip
+  // and a sign-out action when team mode is on.
+  fetch(API + "/auth/me")
+    .then(function (r) {
+      if (r.status === 401) { location.replace("/login"); return null; }
+      return r.ok ? r.json() : null;
+    })
+    .then(function (me) {
+      if (!me || me.team_mode !== true || !me.user) return;
+      var chip = el("team-user");
+      if (chip) {
+        chip.textContent = me.user.username + (me.user.role === "admin" ? " (admin)" : "");
+        chip.classList.remove("hidden");
+        chip.onclick = function () {
+          if (!confirm("Sign out?")) return;
+          fetch(API + "/auth/logout", { method: "POST" })
+            .then(function () { location.replace("/login"); })
+            .catch(function () { location.replace("/login"); });
+        };
+      }
+    })
+    .catch(function () {});
+
+  // The team file area: probe once; the buttons appear only when roots exist.
+  var tfState = { path: "" };
+  function probe() {
+    fetch(API + "/files")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d || !d.roots || !d.roots.length) return;
+        ["team-files-btn", "team-files-dash"].forEach(function (id) {
+          var b = el(id);
+          if (b) { b.classList.remove("hidden"); b.onclick = function () { openPanel(); }; }
+        });
+      })
+      .catch(function () {});
+  }
+  function openPanel() {
+    el("team-files-modal").classList.remove("hidden");
+    load(tfState.path);
+  }
+  function fmtSize(n) {
+    if (n >= 1073741824) return (n / 1073741824).toFixed(1) + " GB";
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+    if (n >= 1024) return (n / 1024).toFixed(1) + " KB";
+    return n + " B";
+  }
+  function load(path) {
+    tfState.path = path || "";
+    var url = API + "/files" + (tfState.path ? "?path=" + encodeURIComponent(tfState.path) : "");
+    fetch(url)
+      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+      .then(function (res) { render(res); })
+      .catch(function () {});
+  }
+  function render(res) {
+    var crumbs = el("team-files-crumbs");
+    var list = el("team-files-list");
+    if (!crumbs || !list) return;
+    crumbs.textContent = "";
+    list.textContent = "";
+    if (!res.ok) {
+      list.textContent = (res.body && res.body.error) || "unavailable";
+      return;
+    }
+    var home = document.createElement("a");
+    home.href = "#"; home.textContent = "roots";
+    home.onclick = function (e) { e.preventDefault(); load(""); };
+    crumbs.appendChild(home);
+    if (tfState.path) {
+      crumbs.appendChild(document.createTextNode("  ›  " + tfState.path));
+    }
+    var upBtn = el("team-files-upload");
+    if (upBtn) upBtn.style.display = tfState.path ? "" : "none";
+    if (res.body.roots) {
+      res.body.roots.forEach(function (root) {
+        var row = document.createElement("div");
+        row.className = "team-files-row";
+        var a = document.createElement("a");
+        a.href = "#"; a.textContent = "📁 " + root.path;
+        a.onclick = function (e) { e.preventDefault(); load(root.path); };
+        row.appendChild(a);
+        list.appendChild(row);
+      });
+      return;
+    }
+    (res.body.entries || []).forEach(function (entry) {
+      var row = document.createElement("div");
+      row.className = "team-files-row";
+      var full = res.body.path + "/" + entry.name;
+      if (entry.dir) {
+        var a = document.createElement("a");
+        a.href = "#"; a.textContent = "📁 " + entry.name;
+        a.onclick = function (e) { e.preventDefault(); load(full); };
+        row.appendChild(a);
+      } else {
+        var link = document.createElement("a");
+        link.href = API + "/files/download?path=" + encodeURIComponent(full);
+        link.textContent = "📄 " + entry.name;
+        row.appendChild(link);
+        var size = document.createElement("span");
+        size.className = "team-files-size";
+        size.textContent = fmtSize(entry.size);
+        row.appendChild(size);
+      }
+      list.appendChild(row);
+    });
+    if (!(res.body.entries || []).length) {
+      var empty = document.createElement("div");
+      empty.className = "team-files-row";
+      empty.textContent = "(empty)";
+      list.appendChild(empty);
+    }
+  }
+  var closeBtn = el("team-files-close");
+  if (closeBtn) closeBtn.onclick = function () { el("team-files-modal").classList.add("hidden"); };
+  var uploadBtn = el("team-files-upload");
+  var uploadInput = el("team-files-input");
+  if (uploadBtn && uploadInput) {
+    uploadBtn.onclick = function () { if (tfState.path) uploadInput.click(); };
+    uploadInput.onchange = function () {
+      var file = uploadInput.files && uploadInput.files[0];
+      uploadInput.value = "";
+      if (!file || !tfState.path) return;
+      var url = API + "/files/upload?dir=" + encodeURIComponent(tfState.path) +
+        "&name=" + encodeURIComponent(file.name) + "&overwrite=1";
+      fetch(url, { method: "POST", body: file })
+        .then(function (r) {
+          if (!r.ok) return r.json().then(function (b) { alert((b && b.error) || ("upload failed (" + r.status + ")")); });
+          load(tfState.path);
+        })
+        .catch(function () { alert("upload failed"); });
+    };
+  }
+  probe();
+})();
+
+/* ---- Team governance (M2-7): guest redirect + minimal admin panel ------ */
+(function teamGovernance() {
+  "use strict";
+  function el(id) { return document.getElementById(id); }
+
+  fetch(API + "/auth/me")
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (me) {
+      if (!me || me.team_mode !== true || !me.user) return;
+      if (me.user.role === "guest") {
+        // A guest's whole surface is the replay viewer (D3).
+        if (location.pathname === "/") location.replace("/replay");
+        return;
+      }
+      if (me.user.role === "admin" || me.user.kind === "service") {
+        var btn = el("team-admin");
+        if (btn) { btn.classList.remove("hidden"); btn.onclick = openAdmin; }
+      }
+    })
+    .catch(function () {});
+
+  function openAdmin() {
+    el("team-admin-modal").classList.remove("hidden");
+    loadAdmin();
+  }
+  var closeBtn = el("team-admin-close");
+  if (closeBtn) closeBtn.onclick = function () { el("team-admin-modal").classList.add("hidden"); };
+  var refreshBtn = el("team-admin-refresh");
+  if (refreshBtn) refreshBtn.onclick = function () { loadAdmin(); };
+
+  function section(parent, title) {
+    var h = document.createElement("h3");
+    h.className = "team-admin-h";
+    h.textContent = title;
+    parent.appendChild(h);
+    var box = document.createElement("div");
+    box.className = "team-admin-sec";
+    parent.appendChild(box);
+    return box;
+  }
+  function table(box, headers, rows) {
+    var t = document.createElement("table");
+    t.className = "team-admin-table";
+    var tr = document.createElement("tr");
+    headers.forEach(function (h) {
+      var th = document.createElement("th"); th.textContent = h; tr.appendChild(th);
+    });
+    t.appendChild(tr);
+    rows.forEach(function (cells) {
+      var r = document.createElement("tr");
+      cells.forEach(function (c) {
+        var td = document.createElement("td"); td.textContent = c == null ? "" : String(c); r.appendChild(td);
+      });
+      t.appendChild(r);
+    });
+    box.appendChild(t);
+    if (!rows.length) {
+      var d = document.createElement("div"); d.className = "team-admin-empty"; d.textContent = "(none)"; box.appendChild(d);
+    }
+  }
+  function jget(path) {
+    return fetch(API + path).then(function (r) { return r.ok ? r.json() : null; });
+  }
+
+  function loadAdmin() {
+    var body = el("team-admin-body");
+    body.textContent = "loading…";
+    Promise.all([
+      jget("/team/users"), jget("/team/usage"), jget("/team/audit?limit=50"),
+      jget("/team/invites"), jget("/team/quotas"),
+    ]).then(function (res) {
+      var users = (res[0] || {}).users || [];
+      var usage = (res[1] || {}).usage || [];
+      var audit = (res[2] || {}).audit || [];
+      var invites = (res[3] || {}).invites || [];
+      var quotas = (res[4] || {}).quotas || [];
+      body.textContent = "";
+      var idName = {};
+      users.forEach(function (u) { idName[u.id] = u.username; });
+      table(section(body, "Users"), ["user", "role", "state", "id"],
+        users.map(function (u) { return [u.username, u.role, u.disabled ? "disabled" : "active", u.id]; }));
+      table(section(body, "Usage"), ["user", "project", "kind", "total", "events"],
+        usage.map(function (r) { return [idName[r.user_id] || r.user_id, r.project_id, r.kind, Math.round(r.total * 100) / 100, r.events]; }));
+      table(section(body, "Quotas"), ["scope", "scope id", "kind", "limit", "window"],
+        quotas.map(function (r) { return [r.scope, r.scope_id, r.kind, r.limit_amount, r.window]; }));
+      table(section(body, "Invites"), ["prefix", "project", "by", "state"],
+        invites.map(function (r) { return [r.token_prefix, r.project_id, r.created_by, r.live ? "live" : (r.used_at ? "used/revoked" : "expired")]; }));
+      table(section(body, "Audit (latest 50)"), ["when", "actor", "action", "target"],
+        audit.map(function (r) { return [new Date(r.ts).toLocaleString(), r.actor, r.action, r.target || r.user_id || ""]; }));
+    }).catch(function () { el("team-admin-body").textContent = "failed to load"; });
+  }
+})();

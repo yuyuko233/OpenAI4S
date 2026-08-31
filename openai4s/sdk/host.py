@@ -490,6 +490,7 @@ class _Host:
         host_call: Callable[[str, list], Any],
         denied: frozenset[str] = frozenset(),
         bash_authorizer: Callable[[str, list], Any] | None = None,
+        generation: str | None = None,
     ):
         # Wrap the raw RPC so every SDK call encodes its args for the wire
         # (snake->camel + drop-None) exactly once, transparently to accessors.
@@ -508,6 +509,7 @@ class _Host:
         self._bash = BashExecutor(
             self._call,
             authorization_call=_encoded_bash_authorizer,
+            generation=generation,
         )
         self.skills = _Skills(self._call)
         # query/mcp are control-plane; only attach when not denied so that a
@@ -748,6 +750,8 @@ class _Host:
         permissions: dict[str, str] | None = None,
         capabilities: list[str] | None = None,
         unrestricted: bool | None = None,
+        require_artifacts: list[str] | None = None,
+        retries: int | None = None,
         wait: bool = True,
     ) -> Any:
         """Spawn sub-agent(s). str/dict -> single; list -> list of results.
@@ -755,6 +759,11 @@ class _Host:
         wait=True (default) blocks for the result(s); wait=False returns child
         handle(s) immediately for later host.collect. output_schema, when
         given, forces each child to submit_output matching that schema.
+        require_artifacts names artifact files (exact names or trailing-star
+        globs) the child must have produced — missing ones downgrade its
+        task_status to at most partial. retries (0-2, clamped; wait=True only)
+        re-runs a partial/blocked/failed child with its previous limitations
+        appended to the request.
         """
         return self._call(
             "delegate",
@@ -771,6 +780,8 @@ class _Host:
                     "permissions": permissions,
                     "capabilities": capabilities,
                     "unrestricted": unrestricted,
+                    "require_artifacts": require_artifacts,
+                    "retries": retries,
                     "wait": wait,
                 }
             ],
@@ -807,14 +818,32 @@ class _Host:
         completion_bullets: list[str],
         *,
         output_schema: dict | None = None,
+        task_status: str | None = None,
+        source_files: list | None = None,
+        entry_points: list | None = None,
+        architecture_summary: str | None = None,
+        test_evidence: list | None = None,
     ) -> dict:
         """Submit the task's structured result + human-facing completion bullets.
 
         completion_bullets must be 1-4 completed-action strings. English uses
         past-tense, verb-first wording; CJK verb phrases are accepted without
         English tense morphology. If output_schema is given, `output` is
-        validated against it. A validation failure returns {"error":...} so
-        the model can retry.
+        validated against it. task_status optionally declares an honest
+        machine-readable status (completed|partial|blocked|failed; omitted
+        means completed) — a delegated parent reads it instead of parsing
+        prose. A validation failure returns {"error":...} so the model can
+        retry.
+
+        source_files ([{path, sha256?}]), entry_points ([path]),
+        architecture_summary (str) and test_evidence ([{command,
+        producing_cell_id}]) describe a code deliverable. They are optional for
+        an ordinary analysis run and REQUIRED — and verified against the
+        filesystem, the artifact store and the recorded cell output — when the
+        turn runs in reusable_pipeline or codebase_change mode. There is
+        deliberately no field for a test's output text: pass/fail is read off
+        the stored stdout of the cell you name, never from what you say it
+        printed.
         """
         return self._call(
             "submit_output",
@@ -823,6 +852,11 @@ class _Host:
                     "output": output,
                     "completion_bullets": completion_bullets,
                     "output_schema": output_schema,
+                    "task_status": task_status,
+                    "source_files": source_files,
+                    "entry_points": entry_points,
+                    "architecture_summary": architecture_summary,
+                    "test_evidence": test_evidence,
                 }
             ],
         )
@@ -1003,6 +1037,33 @@ class _Host:
         """
         return self._call("remote_gpu_status", [{}])
 
+    def accelerator_status(self) -> dict:
+        """Inspect local GPUs and SSH-remote GPU registrations separately.
+
+        Hardware visibility does not imply that a model repository,
+        environment, checkpoint, or canary has been admitted.
+        """
+        return self._call("accelerator_status", [{}])
+
+    def stage_model_asset(
+        self,
+        source_path: str,
+        *,
+        asset_name: str | None = None,
+        expected_sha256: str | None = None,
+    ) -> dict:
+        """Import a user-supplied local checkpoint, without admitting it."""
+        return self._call(
+            "stage_model_asset",
+            [
+                {
+                    "source_path": source_path,
+                    "asset_name": asset_name,
+                    "expected_sha256": expected_sha256,
+                }
+            ],
+        )
+
     def register_remote_capability(
         self,
         alias: str,
@@ -1158,8 +1219,16 @@ def build_host(
     mode: str = "repl",
     *,
     bash_authorizer: Callable[[str, list], Any] | None = None,
+    generation: str | None = None,
 ) -> _Host:
     """Assemble the host.* facade for a kernel.
+
+    `generation` is the worker's `authorization_generation`, which
+    `host.bash` binds its one-shot token to. A local worker gets it from
+    `OPENAI4S_KERNEL_GENERATION`; a remote one has no such environment and
+    receives it on the handshake response instead, so it must be passed in
+    *here* -- the BashExecutor reads its fallback once, at construction, and
+    a value supplied afterwards would arrive too late.
 
     capability gate = splice trimming, not a runtime if-check. The `repl`
     (control-plane) kernel is spliced with the full OPENAI4S surface; the analysis
@@ -1171,11 +1240,12 @@ def build_host(
     ./handoff/*.json instead of host.query/host.frames.
     """
     if mode == "repl":
-        return _Host(host_call, bash_authorizer=bash_authorizer)
+        return _Host(host_call, bash_authorizer=bash_authorizer, generation=generation)
     if mode in ("python", "analysis", "r", "R"):
         return _Host(
             host_call,
             denied=_ANALYSIS_DENY,
             bash_authorizer=bash_authorizer,
+            generation=generation,
         )
     raise ValueError(f"build_host: unknown kernel mode {mode!r}")

@@ -1,6 +1,6 @@
 [project]
 name = "openai4s"
-version = "0.1.0"
+version = "0.2.0"
 description = "A pure-stdlib hybrid Code-as-Action scientific research agent."
 readme = { file = "README.md", content-type = "text/markdown" }
 license = "MIT"
@@ -39,11 +39,34 @@ science = [
     "matplotlib>=3.7",
     "scikit-learn>=1.3",
 ]
+# CPU-first single-cell workflows require Python 3.11 because PyDESeq2 0.5.4
+# raised its floor. Pertpy 1.0.3 is the newest release compatible with both
+# that floor and Scanpy 1.11.5; Pertpy 1.1.1 requires Python 3.12 and imports a
+# Scanpy symbol that 1.11.5 removed. Keep the group separate from `science`:
+# the OpenAI4S core still supports Python 3.10 and remains dependency-free.
+# Pertpy's core hard-requires the Flax/NumPyro/ott-jax stack, so pertpy and
+# its mudata pin live ONLY here — never in envs/python.yml or the desktop
+# bundle. Install with: uv sync --extra singlecell
+singlecell = [
+    "scanpy[harmony,skmisc]==1.11.5; python_version >= '3.11'",
+    "igraph>=0.11; python_version >= '3.11'",
+    "leidenalg>=0.10; python_version >= '3.11'",
+    # Pertpy calls mudata.set_options(), removed in mudata 0.4.
+    "mudata<0.4; python_version >= '3.11'",
+    "pertpy[de]==1.0.3; python_version >= '3.11'",
+    "pydeseq2==0.5.4; python_version >= '3.11'",
+]
 # Optional cheminformatics support is kept separate because RDKit does not
 # publish wheels for every platform supported by the core/science environment.
 # Install where available with: uv sync --extra chemistry
 chemistry = [
     "rdkit>=2024.9",
+]
+# Coverage-guided parser fuzzing is a separate Linux-only gate. Keeping Atheris
+# out of dev preserves ordinary macOS/Windows setup and the dependency-free
+# runtime while uv.lock still pins the exact CI environment.
+fuzz = [
+    "atheris==3.1.0; python_version >= '3.12' and python_version < '3.15' and sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [dependency-groups]
@@ -60,6 +83,13 @@ dev = [
     # major the resolver happened to pick.
     "mypy>=2.3,<3",
     "pytest>=7.4",
+    # The offline suite is ~6,000 tests and was the whole critical path of CI:
+    # 1094 of the offline-test job's 1122 seconds were this one command. xdist
+    # splits it across the runner's cores. CI runs it as `-n auto
+    # --maxprocesses=4 --dist loadfile`; the cap and scheduler choice are
+    # argued where they are written, in .github/workflows/ci.yml. >=3.6 is
+    # where the `loadfile` spelling used there is stable.
+    "pytest-xdist>=3.6",
     # >=3.2 because the pre-commit-hooks and isort hooks pinned in
     # .pre-commit-config.yaml declare `minimum_pre_commit_version: 3.2.0`,
     # which pre-commit validates at manifest load -- a hard error, not a skip.
@@ -70,7 +100,7 @@ dev = [
 openai4s = "openai4s.cli:main"
 
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -105,7 +135,15 @@ openai4s = [
     "server/webui/vendor/*.js",
     "server/webui/vendor/fonts/*.woff2",
 ]
-"*" = ["*.html", "*.json", "*.lock", "*.md", "*.yml"]
+# Data-only trees (skills*, envs*, workflows*) ship whole rather than by
+# extension. The enumerated list needed one entry per upstream file type and
+# ended with the literal basename of a single vendored Snakemake file, so a
+# re-pin that renamed it -- or added a `Dockerfile`, `nextflow.config`, or a
+# `.bed` fixture -- would have dropped it from the wheel silently.
+"*" = ["**/*"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["**/__pycache__/**", "**/*.py[cod]"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -200,6 +238,11 @@ files = [
     "openai4s/agent/models.py",
     "openai4s/agent/ports.py",
     "openai4s/host_dispatch.py",
+    # The orchestration contract. Strict from birth rather than retrofitted:
+    # these two modules are the boundary a second backend is written against,
+    # and a wrong type here is discovered on a cluster at 2am.
+    "openai4s/orchestration/models.py",
+    "openai4s/orchestration/ports.py",
 ]
 follow_imports = "skip"
 check_untyped_defs = true

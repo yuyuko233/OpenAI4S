@@ -12,6 +12,7 @@ import re
 import shutil
 from typing import Any
 
+from openai4s import execution_principal
 from openai4s.skills_loader import SkillLoader, SkillVersionService, frontmatter_edit
 from openai4s.skills_loader.loader import skill_readiness
 
@@ -37,6 +38,7 @@ SKILL_FAILURE_STATUS: dict[str, int] = {
     "skill_name_conflict": 409,
     "skill_not_found": 404,
     "skill_read_only": 403,
+    "skill_admin_required": 403,
     "skill_no_version_history": 404,
     # The version store is a dependency that is absent, not a bad request.
     "skill_version_storage_unavailable": 503,
@@ -152,12 +154,40 @@ class SkillCustomizationService:
                     f"'{slug}' collides with a built-in skill — "
                     "pick a different name",
                 )
-            if not existing and (self.loader.skills_dir / slug).is_dir():
+            # Every bundled root, not just `skills/`. `bundled_name_collision`
+            # only knows DECLARED names, and 143 of the imported collection's
+            # directories declare a different one -- so a slug matching such a
+            # directory passed both checks, was created on disk, and was then
+            # dropped by `discover()` (which keys the bundled map by directory
+            # name). The user got a success and a Skill they could never see,
+            # list, or edit.
+            directory_collision = getattr(
+                self.loader, "bundled_directory_collision", None
+            )
+            if callable(directory_collision):
+                reserved_directory = directory_collision(slug)
+            else:
+                bundled_roots = getattr(self.loader, "bundled_roots", None)
+                roots = (
+                    [root for root, _c in bundled_roots()]
+                    if callable(bundled_roots)
+                    else [self.loader.skills_dir]
+                )
+                reserved_directory = next(
+                    (root / slug for root in roots if (root / slug).is_dir()), None
+                )
+            if reserved_directory is not None:
                 return _fail(
                     "skill_name_conflict",
                     f"'{slug}' collides with a built-in skill — "
                     "pick a different name",
                 )
+        except ValueError as error:
+            # Duplicate bundled collection ids/directories/declared identities
+            # are invalid catalog state, not an absent optional collision API.
+            # Fail before creating a version or writing a document; swallowing
+            # this error writes a Skill and then crashes on the final refresh.
+            return _fail("skill_write_failed", str(error))
         except Exception:  # noqa: BLE001 - preserve the legacy soft collision check
             pass
 
@@ -395,6 +425,9 @@ class SkillCustomizationService:
                         else ""
                     ),
                     "origin": origin,
+                    "collection": (
+                        item.get("collection") if isinstance(item, dict) else None
+                    ),
                     "scope": item_scope,
                     "editable": editable.get(name, origin == "user"),
                     "enabled": name not in disabled_names,
@@ -469,6 +502,51 @@ class SkillCustomizationService:
                 "skill_version_storage_unavailable",
                 "skill version storage is unavailable",
             )
+        if self.scope == "project":
+            scope_id = str(self.project_id or "")
+            repository = self.versions.repository
+            # Resolve ownership before reading the target manifest or event
+            # metadata.  Otherwise the distinct admin-only answer below becomes
+            # a cross-project oracle for a guessed version id.
+            if repository.version_belongs_to(
+                name,
+                version_id,
+                scope="project",
+                scope_id=scope_id,
+            ):
+                version = repository.get_version(version_id, include_files=False)
+                provenance = repository.activation_metadata_for_version(
+                    name,
+                    version_id,
+                    scope="project",
+                    scope_id=scope_id,
+                )
+                manifest = version.get("manifest") or {}
+                sidecar = manifest.get("sidecar") or {}
+                human_recipe = any(
+                    item.get("source") == "web_customize"
+                    or item.get("authorized_admin") is True
+                    for item in provenance
+                    if isinstance(item, dict)
+                )
+                # A kernel.py is executable Python, even when Web-authored.  A
+                # recipe-only version remains a member's deliberate project
+                # mutation only when its activation provenance proves a Web
+                # save (or a post-fix administrator Host edit).  Legacy/unknown
+                # Host versions fail closed so the old poisoning path cannot be
+                # reactivated through the human rollback route.
+                needs_admin = sidecar.get("present") is True or not human_recipe
+                if needs_admin:
+                    try:
+                        principal = execution_principal.resolve()
+                    except PermissionError:
+                        principal = None
+                    if principal is None or not principal.is_admin:
+                        return _fail(
+                            "skill_admin_required",
+                            "project Skill executable or untrusted-history "
+                            "rollback requires a team administrator",
+                        )
         try:
             result = self.versions.rollback(
                 name,

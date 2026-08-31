@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from openai4s import execution_principal
 from openai4s.config import Config
 from openai4s.host import resource_allowlist
 from openai4s.skills_loader import SkillLoader, SkillVersionService
@@ -102,16 +103,47 @@ class SkillService:
             return "project", self.project_id
         return "personal", None
 
+    def _authorize_mutation(
+        self, scope: str, project_id: str | None
+    ) -> execution_principal.Principal:
+        """Apply team authorization in addition to interactive approval.
+
+        The permission broker answers whether the person running this turn
+        consents to an agent mutation.  It does not make that person an
+        administrator.  Both the personal Skill directory and a project Skill
+        overlay are executable inputs to later agent runs: a project member's
+        model must not be able to rewrite the recipe or ``kernel.py`` that a
+        peer will load merely because the member may make an ordinary project
+        edit through the authenticated Web API.  Host-originated Skill writes
+        therefore require an administrator in team mode.  Human project
+        authoring remains on the separate HTTP service and its project-member
+        authorization boundary.
+
+        ``resolve()`` is deliberately used instead of reading an optional
+        principal: an unpropagated team identity must fail closed.  Off team
+        mode it returns the explicit single-user principal, preserving the
+        existing local authoring contract.
+        """
+
+        principal = execution_principal.resolve()
+        if principal.is_admin:
+            return principal
+        target = "project" if scope == "project" and project_id else "personal"
+        raise PermissionError(
+            f"{target} Skill mutation through Host requires a team administrator"
+        )
+
     def load(self, name: str | dict) -> dict:
         """Load full guidance, with the historical fuzzy-name fallback."""
         if isinstance(name, dict):
             name = name.get("name", "")
         self.loader.discover()
-        skill = self.loader.get(name)
-        if skill is None:
-            hits = self.loader.search(name, limit=1)
-            if hits:
-                skill = self.loader.get(hits[0]["name"])
+        # Guarded fuzzy resolution, over the PERMITTED set. Resolving against
+        # the whole corpus and refusing afterwards turns "you misspelled your
+        # own skill" into "no such skill" for a child with an allowlist, and
+        # the unguarded single-best-match fallback handed back an unrelated
+        # collection recipe under the name the caller asked for.
+        skill = self.loader.resolve(str(name), permits=self._permits)
         if skill is None or not self._permits(getattr(skill, "name", "")):
             # Same answer for "does not exist" and "not yours". A distinct
             # refusal would confirm the skill is there, which is most of what
@@ -130,12 +162,21 @@ class SkillService:
 
     def search(self, spec: dict) -> list:
         self.loader.discover()
-        # Filtered after the search rather than before: the loader ranks over
-        # the whole corpus, and pre-filtering would change the ranking of what
-        # remains. Asking for 5 and getting 3 is honest; getting 5 that were
-        # scored against a different corpus is not.
+        # The allowlist is applied inside the ranking, between scoring and the
+        # limit slice, NOT to the sliced result. Scoring still happens over the
+        # whole corpus, so a permitted skill keeps the rank it earned -- but
+        # filtering a global top-5 afterwards is how a Specialist got nothing:
+        # with 561 collection recipes in the same lexical index, none of the
+        # two skills it is allowed appear in the top 5 for "protein structure
+        # prediction and design pipeline", where before the import it got
+        # `proteinmpnn`. `_filter` stays as the belt-and-braces pass so this
+        # method still cannot return a row `_permits` would reject.
         return self._filter(
-            self.loader.search(spec.get("query", ""), limit=int(spec.get("limit", 5)))
+            self.loader.search(
+                spec.get("query", ""),
+                limit=int(spec.get("limit", 5)),
+                permits=self._permits,
+            )
         )
 
     def system_context(self) -> str:
@@ -213,6 +254,19 @@ class SkillService:
             raise PermissionError(
                 f"skill {name!r} origin={existing.origin} is read-only"
             )
+        scope, project_id = self._writable_scope(existing)
+        principal = self._authorize_mutation(scope, project_id)
+        candidate_directory = (
+            existing.root.name if existing is not None else self.versions.slug(name)
+        )
+        directory_collision = self.loader.bundled_directory_collision(
+            candidate_directory
+        )
+        if directory_collision is not None:
+            raise PermissionError(
+                f"skill directory {candidate_directory!r} collides with read-only "
+                f"bundled directory {directory_collision}"
+            )
 
         if relative == "SKILL.md" and old_string is None:
             self._reject_bundled_name_collision(content, fallback=name)
@@ -257,7 +311,6 @@ class SkillService:
                 fallback=existing.name if existing is not None else name,
             )
         files[relative] = updated_content.encode("utf-8")
-        scope, project_id = self._writable_scope(existing)
         self.versions.install(
             existing.name if existing is not None else name,
             files,
@@ -266,7 +319,16 @@ class SkillService:
             scope=scope,
             project_id=project_id,
             require_sidecar_gate=False,
-            metadata={"source": "host_skills_edit", "path": relative},
+            metadata={
+                "source": "host_skills_edit",
+                "path": relative,
+                # This bit is written by the trusted Host only after the
+                # authorization check above.  The human HTTP rollback service
+                # can therefore distinguish a post-fix administrator-authored
+                # recipe from an un-attributed legacy Host version without
+                # exposing a user id in version history.
+                "authorized_admin": principal.is_admin,
+            },
         )
 
         result: dict[str, Any] = {
@@ -291,8 +353,18 @@ class SkillService:
             raise KeyError(f"no such skill: {name!r}")
         if skill.read_only:
             raise PermissionError(f"skill {name!r} is read-only")
-        self.versions.publish(name, slug=skill.root.name)
-        return {"ok": True, "origin": "personal"}
+        scope, project_id = self._writable_scope(skill)
+        self._authorize_mutation(scope, project_id)
+        self.versions.publish(
+            name,
+            scope=scope,
+            project_id=project_id,
+            slug=skill.root.name,
+        )
+        return {
+            "ok": True,
+            "origin": "personal" if scope == "personal" else skill.origin,
+        }
 
     def delete(self, name: str) -> dict:
         if not self._permits(str(name or "")):
@@ -304,6 +376,7 @@ class SkillService:
         if skill.read_only:
             raise PermissionError(f"skill {name!r} is read-only")
         scope, project_id = self._writable_scope(skill)
+        self._authorize_mutation(scope, project_id)
         installation = self.versions.repository.get_installation(
             skill.name,
             scope=scope,
@@ -397,6 +470,7 @@ class SkillService:
             else {"name": name, "version_id": version_id, "scope": "personal"}
         )
         skill_name, scope, project_id, _limit = self._version_request(spec)
+        self._authorize_mutation(scope, project_id)
         target_version = str(spec.get("version_id") or "").strip()
         if not target_version:
             raise ValueError("skill version_id is required")

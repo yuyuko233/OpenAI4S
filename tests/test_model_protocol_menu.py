@@ -27,6 +27,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -109,9 +110,22 @@ def _node() -> str:
 
 
 def _run(script: str, *args: str) -> dict:
-    result = subprocess.run(
-        [_node(), "-e", script, *args], capture_output=True, text=True, timeout=60
-    )
+    # The harnesses inline both I18N dictionaries, so the script grows with
+    # every translated string. `node -e` carries it as one argv entry, and
+    # Linux caps a single argument at MAX_ARG_STRLEN (128 KiB): crossing that
+    # turns every test here into `OSError: [Errno 7] Argument list too long`,
+    # which reads as a broken harness rather than "one more phrase was
+    # translated". A file has no such ceiling. `-e` still runs the require, so
+    # process.argv keeps starting at the first test argument.
+    with tempfile.TemporaryDirectory() as directory:
+        harness = Path(directory) / "harness.js"
+        harness.write_text(script, encoding="utf-8")
+        result = subprocess.run(
+            [_node(), "-e", f"require({json.dumps(str(harness))})", *args],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -184,7 +198,7 @@ def test_the_menu_ignores_values_that_are_not_protocol_ids():
 
 
 # --------------------------------------------------------------------------
-# opening the pane contacts nobody
+# opening the pane does not scan local model servers
 # --------------------------------------------------------------------------
 
 _PANE_HARNESS = """
@@ -254,12 +268,11 @@ def _open_pane() -> dict:
     return _run(script, json.dumps(payload))
 
 
-def test_opening_the_models_pane_scans_nothing():
-    """It read the profile list and then probed four loopback ports, on every
-    render -- and this pane is re-rendered after every save, activate and
-    delete. Nothing on open may touch a socket."""
+def test_opening_the_models_pane_does_not_scan_local_servers():
+    """The pane may load account metadata, but local model discovery remains
+    an explicit action instead of probing four loopback ports on every render."""
     result = _open_pane()
-    assert result["onOpen"] == ["/model-profiles"]
+    assert result["onOpen"] == ["/model-profiles", "/volcengine/connection"]
     assert "/model-endpoints/discover" not in result["onOpen"]
     # And it says so, rather than reusing "nothing was detected" for something
     # that was never looked for.
@@ -270,7 +283,9 @@ def test_the_scan_still_happens_when_the_button_is_pressed():
     """Removing the render-time call must not remove the feature: local
     discovery is useful, it just has to be asked for."""
     result = _open_pane()
-    assert "/model-endpoints/discover" in result["afterClick"][1]
+    assert any(
+        path.startswith("/model-endpoints/discover") for path in result["afterClick"]
+    )
 
 
 def test_the_generated_menu_is_the_control_the_user_sees():
